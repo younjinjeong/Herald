@@ -1,0 +1,23 @@
+[package]
+name = "herald-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Herald core library - shared types, IPC, auth, and Telegram integration"
+
+[dependencies]
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+teloxide = { version = "0.13", features = ["macros"] }
+keyring = { version = "3" }
+nix = { version = "0.29", features = ["socket", "user", "process"] }
+regex = "1"
+rand = "0.8"
+sha2 = "0.10"
+dirs = "6"

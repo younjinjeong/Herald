@@ -1,0 +1,8 @@
+/target
+*.sock
+*.pid
+*.enc
+.env
+*.swp
+*.swo
+*~

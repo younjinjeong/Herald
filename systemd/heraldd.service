@@ -1,0 +1,23 @@
+[Unit]
+Description=Herald - Claude Code Telegram Remote Control Daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=%h/.local/bin/heraldd
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=5
+WatchdogSec=30
+Environment=RUST_LOG=info
+
+# Security hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/herald %t/herald
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

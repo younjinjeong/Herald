@@ -1,0 +1,8 @@
+{
+  "name": "herald",
+  "description": "Herald - Claude Code Telegram Remote Control. Relays Claude Code session I/O to Telegram for mobile monitoring and control.",
+  "version": "0.1.0",
+  "author": {
+    "name": "younjinjeong"
+  }
+}
