@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: herald
+  labels:
+    app: herald
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: herald
+  template:
+    metadata:
+      labels:
+        app: herald
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      containers:
+        - name: heraldd
+          image: herald:latest
+          ports:
+            - containerPort: 7272
+              name: ipc-tcp
+          env:
+            - name: HERALD_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: herald-secrets
+                  key: bot-token
+            - name: HERALD_CONTAINER
+              value: "1"
+            - name: RUST_LOG
+              value: "info"
+          livenessProbe:
+            exec:
+              command:
+                - herald
+                - status
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            tcpSocket:
+              port: 7272
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "500m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: herald
+  labels:
+    app: herald
+spec:
+  selector:
+    app: herald
+  ports:
+    - port: 7272
+      targetPort: 7272
+      name: ipc-tcp
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: herald-secrets
+type: Opaque
+stringData:
+  bot-token: "YOUR_BOT_TOKEN_HERE"

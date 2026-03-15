@@ -24,8 +24,9 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     let telegram_connected = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-    // Create conversation logger
-    let logger = Arc::new(ConversationLogger::default());
+    // Create conversation logger with configured output mode
+    let log_output = herald_core::logging::LogOutput::from_str(&config.daemon.log_output);
+    let logger = Arc::new(ConversationLogger::new(None, log_output));
 
     // Create message queue
     let (queue_tx, queue_rx) = mpsc::channel::<OutboundMessage>(256);
@@ -56,7 +57,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
 
     let mut ipc_server = {
         let config = config_for_ipc.read().await;
-        IpcServer::bind(&config.daemon.socket_path).await?
+        IpcServer::bind_from_config(&config.daemon).await?
     };
 
     let logger_for_ipc = logger.clone();

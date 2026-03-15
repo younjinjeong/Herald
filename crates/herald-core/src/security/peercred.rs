@@ -1,6 +1,3 @@
-use tokio::net::UnixStream;
-use std::os::unix::io::AsRawFd;
-
 use crate::error::{HeraldError, Result};
 
 #[derive(Debug, Clone)]
@@ -10,10 +7,11 @@ pub struct PeerCredentials {
     pub gid: u32,
 }
 
-pub fn verify_peer(stream: &UnixStream) -> Result<PeerCredentials> {
-    let fd = stream.as_raw_fd();
+#[cfg(target_os = "linux")]
+pub fn verify_peer(stream: &tokio::net::UnixStream) -> Result<PeerCredentials> {
+    use std::os::unix::io::AsRawFd;
 
-    // Safety: fd is valid as long as stream is alive
+    let fd = stream.as_raw_fd();
     let borrowed_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
 
     let cred = nix::sys::socket::getsockopt(
@@ -37,4 +35,40 @@ pub fn verify_peer(stream: &UnixStream) -> Result<PeerCredentials> {
         uid: cred.uid(),
         gid: cred.gid(),
     })
+}
+
+#[cfg(target_os = "macos")]
+pub fn verify_peer(stream: &tokio::net::UnixStream) -> Result<PeerCredentials> {
+    use std::os::unix::io::AsRawFd;
+
+    let fd = stream.as_raw_fd();
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    let ret = unsafe { libc::getpeereid(fd, &mut uid, &mut gid) };
+
+    if ret != 0 {
+        return Err(HeraldError::Security(
+            "Failed to get peer credentials via getpeereid".to_string(),
+        ));
+    }
+
+    let my_uid = unsafe { libc::getuid() };
+    if uid != my_uid {
+        return Err(HeraldError::Security(format!(
+            "Peer UID {} does not match daemon UID {}",
+            uid, my_uid
+        )));
+    }
+
+    Ok(PeerCredentials {
+        pid: 0,
+        uid,
+        gid,
+    })
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+pub fn verify_peer(_stream: &tokio::net::UnixStream) -> Result<PeerCredentials> {
+    tracing::warn!("Peer credential verification not supported on this platform");
+    Ok(PeerCredentials { pid: 0, uid: 0, gid: 0 })
 }

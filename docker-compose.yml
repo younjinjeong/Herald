@@ -1,0 +1,52 @@
+services:
+  herald:
+    build: .
+    environment:
+      - HERALD_BOT_TOKEN=${HERALD_BOT_TOKEN}
+      - HERALD_CONTAINER=1
+      - RUST_LOG=info
+    ports:
+      - "7272:7272"
+    volumes:
+      - herald-config:/root/.config/herald
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "app=herald"
+
+  # Optional: Loki log aggregation
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    command: -config.file=/etc/loki/local-config.yaml
+    profiles: ["monitoring"]
+
+  # Optional: Promtail log shipping
+  promtail:
+    image: grafana/promtail:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    profiles: ["monitoring"]
+
+  # Optional: Grafana dashboard
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+    depends_on:
+      - loki
+    profiles: ["monitoring"]
+
+volumes:
+  herald-config:

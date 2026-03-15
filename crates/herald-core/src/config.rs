@@ -23,8 +23,16 @@ pub struct HeraldConfig {
 pub struct DaemonConfig {
     #[serde(default = "default_socket_path")]
     pub socket_path: PathBuf,
+    #[serde(default = "default_listen_addr")]
+    pub listen_addr: String,
+    #[serde(default = "default_transport")]
+    pub transport: String,
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default = "default_log_output")]
+    pub log_output: String,
+    #[serde(default = "default_auth_mode")]
+    pub auth_mode: String,
     #[serde(default = "default_pid_file")]
     pub pid_file: PathBuf,
 }
@@ -94,8 +102,24 @@ fn default_socket_path() -> PathBuf {
     }
 }
 
+fn default_listen_addr() -> String {
+    "0.0.0.0:7272".to_string()
+}
+fn default_transport() -> String {
+    "unix".to_string()
+}
 fn default_log_level() -> String {
     "INFO".to_string()
+}
+fn default_log_output() -> String {
+    if std::env::var("HERALD_CONTAINER").is_ok() {
+        "stdout".to_string()
+    } else {
+        "file".to_string()
+    }
+}
+fn default_auth_mode() -> String {
+    "peercred".to_string()
 }
 
 fn default_pid_file() -> PathBuf {
@@ -168,7 +192,11 @@ impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
             socket_path: default_socket_path(),
+            listen_addr: default_listen_addr(),
+            transport: default_transport(),
             log_level: default_log_level(),
+            log_output: default_log_output(),
+            auth_mode: default_auth_mode(),
             pid_file: default_pid_file(),
         }
     }

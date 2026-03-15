@@ -23,8 +23,11 @@ async fn main() -> Result<()> {
         &herald_core::config::HeraldConfig::default_path(),
     )?;
 
-    // Notify systemd that we are ready
-    let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+    // Notify systemd that we are ready (Linux with systemd only)
+    #[cfg(feature = "systemd")]
+    {
+        let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
+    }
 
     info!("Herald daemon ready");
 

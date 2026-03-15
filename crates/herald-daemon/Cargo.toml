@@ -9,6 +9,10 @@ description = "Herald daemon - Claude Code Telegram relay service"
 name = "heraldd"
 path = "src/main.rs"
 
+[features]
+default = ["systemd"]
+systemd = ["dep:sd-notify", "dep:tracing-journald"]
+
 [dependencies]
 herald-core = { path = "../herald-core" }
 tokio = { workspace = true }
@@ -17,8 +21,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-tracing-journald = "0.3"
-sd-notify = "0.4"
 nix = { version = "0.29", features = ["term", "process", "signal"] }
 libc = "0.2"
 teloxide = { version = "0.13", features = ["macros"] }
+
+# Optional: Linux systemd integration
+sd-notify = { version = "0.4", optional = true }
+tracing-journald = { version = "0.3", optional = true }

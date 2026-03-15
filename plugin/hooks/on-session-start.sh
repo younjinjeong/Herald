@@ -20,7 +20,12 @@ MSG=$(jq -n \
     '{"type": "Register", "session_id": $sid, "pid": $pid, "cwd": $cwd}')
 
 # Send to daemon via herald CLI
-echo "$MSG" | herald ipc-send 2>/dev/null || true
+# Send to daemon (TCP if HERALD_DAEMON_ADDR set, else Unix socket)
+if [ -n "$HERALD_DAEMON_ADDR" ]; then
+    echo "$MSG" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null || true
+else
+    echo "$MSG" | herald ipc-send 2>/dev/null || true
+fi
 
 # Output context for Claude
 echo '{"hookSpecificOutput": {"additionalContext": "Herald: session registered for Telegram relay"}}'

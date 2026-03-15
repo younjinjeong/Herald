@@ -16,4 +16,8 @@ MSG=$(jq -n \
     --arg token "$TOKEN" \
     '{"type": "Unregister", "session_id": $sid, "token": $token}')
 
-echo "$MSG" | herald ipc-send 2>/dev/null || true
+if [ -n "$HERALD_DAEMON_ADDR" ]; then
+    echo "$MSG" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null || true
+else
+    echo "$MSG" | herald ipc-send 2>/dev/null || true
+fi

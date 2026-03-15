@@ -28,10 +28,17 @@ enum Commands {
         session: String,
         /// Prompt message
         message: String,
+        /// Connect via TCP instead of Unix socket (host:port)
+        #[arg(long)]
+        tcp: Option<String>,
     },
     /// Internal: send raw IPC message from stdin (used by hook scripts)
     #[command(hide = true)]
-    IpcSend,
+    IpcSend {
+        /// Connect via TCP instead of Unix socket (host:port)
+        #[arg(long)]
+        tcp: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -50,10 +57,12 @@ async fn main() -> Result<()> {
         Commands::Start => commands::start::run().await?,
         Commands::Stop => commands::stop::run().await?,
         Commands::Status => commands::status::run().await?,
-        Commands::Send { session, message } => {
-            commands::send::run(&session, &message).await?
-        }
-        Commands::IpcSend => commands::send::ipc_send().await?,
+        Commands::Send {
+            session,
+            message,
+            tcp,
+        } => commands::send::run(&session, &message, tcp.as_deref()).await?,
+        Commands::IpcSend { tcp } => commands::send::ipc_send(tcp.as_deref()).await?,
     }
 
     Ok(())

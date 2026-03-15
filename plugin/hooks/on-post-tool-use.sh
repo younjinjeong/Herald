@@ -25,7 +25,11 @@ MSG=$(jq -n \
     --arg tresp "$TOOL_RESPONSE" \
     '{"type": "Output", "session_id": $sid, "token": $token, "tool_name": $tool, "tool_input_summary": $tinput, "tool_response_summary": $tresp}')
 
-echo "$MSG" | herald ipc-send 2>/dev/null || true
+if [ -n "$HERALD_DAEMON_ADDR" ]; then
+    echo "$MSG" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null || true
+else
+    echo "$MSG" | herald ipc-send 2>/dev/null || true
+fi
 
 # Extract token usage from transcript (if available)
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then

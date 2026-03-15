@@ -1,26 +1,89 @@
-use std::fs::{self, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::path::Path;
 
 use chrono::Utc;
 use tracing::error;
 
 use crate::types::TokenUsage;
 
-const DEFAULT_LOG_PATH: &str = "/var/log/herald-relay.log";
+/// Platform-aware default log path
+fn default_log_path() -> String {
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = dirs::home_dir() {
+            return home
+                .join("Library/Logs/herald/herald-relay.log")
+                .display()
+                .to_string();
+        }
+    }
+    "/var/log/herald-relay.log".to_string()
+}
+
+/// Log output mode
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogOutput {
+    File,
+    Stdout,
+    Both,
+}
+
+impl LogOutput {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "stdout" => Self::Stdout,
+            "both" => Self::Both,
+            _ => Self::File,
+        }
+    }
+}
 
 pub struct ConversationLogger {
     log_path: String,
+    output: LogOutput,
 }
 
 impl ConversationLogger {
-    pub fn new(log_path: Option<&str>) -> Self {
+    pub fn new(log_path: Option<&str>, output: LogOutput) -> Self {
         Self {
-            log_path: log_path.unwrap_or(DEFAULT_LOG_PATH).to_string(),
+            log_path: log_path
+                .map(|s| s.to_string())
+                .unwrap_or_else(default_log_path),
+            output,
         }
     }
 
     fn write_line(&self, line: &str) {
+        // Stdout output (for containers/Loki)
+        if self.output == LogOutput::Stdout || self.output == LogOutput::Both {
+            println!("{}", line);
+        }
+
+        // File output
+        if self.output == LogOutput::File || self.output == LogOutput::Both {
+            self.write_to_file(line);
+        }
+    }
+
+    /// Write structured JSON to stdout (Loki/Promtail friendly)
+    fn write_json_stdout(&self, session_id: &str, log_type: &str, content: &str) {
+        if self.output == LogOutput::Stdout || self.output == LogOutput::Both {
+            let json = serde_json::json!({
+                "ts": Utc::now().to_rfc3339(),
+                "session": session_id,
+                "type": log_type,
+                "content": content,
+            });
+            println!("{}", json);
+        }
+    }
+
+    fn write_to_file(&self, line: &str) {
+        // Ensure parent directory exists
+        if let Some(parent) = std::path::Path::new(&self.log_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+
         match OpenOptions::new()
             .create(true)
             .append(true)
@@ -32,12 +95,12 @@ impl ConversationLogger {
                 }
             }
             Err(e) => {
-                // Fallback: try user-level path if /var/log is not writable
                 let fallback = dirs::config_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
                     .join("herald")
                     .join("herald-relay.log");
 
+                let _ = std::fs::create_dir_all(fallback.parent().unwrap());
                 if let Ok(mut file) = OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -58,63 +121,103 @@ impl ConversationLogger {
 
     pub fn log_user_prompt(&self, session_id: &str, content: &str) {
         let ts = Utc::now().to_rfc3339();
-        self.write_line(&format!(
+        let file_line = format!(
             "{} [session:{}] USER: {}",
             ts,
             session_id,
             content.replace('\n', " ")
-        ));
+        );
+
+        if self.output == LogOutput::File {
+            self.write_to_file(&file_line);
+        } else {
+            self.write_json_stdout(session_id, "user_prompt", content);
+            if self.output == LogOutput::Both {
+                self.write_to_file(&file_line);
+            }
+        }
     }
 
     pub fn log_assistant_response(&self, session_id: &str, content: &str) {
-        let ts = Utc::now().to_rfc3339();
-        // Strip code blocks and keep only descriptive text
         let filtered = filter_assistant_text(content);
-        if !filtered.is_empty() {
-            self.write_line(&format!(
-                "{} [session:{}] CLAUDE: {}",
-                ts,
-                session_id,
-                filtered.replace('\n', " ")
-            ));
+        if filtered.is_empty() {
+            return;
+        }
+
+        let ts = Utc::now().to_rfc3339();
+        let file_line = format!(
+            "{} [session:{}] CLAUDE: {}",
+            ts,
+            session_id,
+            filtered.replace('\n', " ")
+        );
+
+        if self.output == LogOutput::File {
+            self.write_to_file(&file_line);
+        } else {
+            self.write_json_stdout(session_id, "assistant_response", &filtered);
+            if self.output == LogOutput::Both {
+                self.write_to_file(&file_line);
+            }
         }
     }
 
     pub fn log_tool_summary(&self, session_id: &str, content: &str) {
         let ts = Utc::now().to_rfc3339();
-        self.write_line(&format!(
+        let file_line = format!(
             "{} [session:{}] TOOL: {}",
             ts,
             session_id,
             content.replace('\n', " ")
-        ));
+        );
+
+        if self.output == LogOutput::File {
+            self.write_to_file(&file_line);
+        } else {
+            self.write_json_stdout(session_id, "tool_summary", content);
+            if self.output == LogOutput::Both {
+                self.write_to_file(&file_line);
+            }
+        }
     }
 
     pub fn log_token_usage(&self, session_id: &str, usage: &TokenUsage) {
         let ts = Utc::now().to_rfc3339();
-        self.write_line(&format!(
-            "{} [session:{}] TOKENS: in={} out={} cache_read={} cache_create={} cost=${:.4}",
-            ts,
-            session_id,
+        let summary = format!(
+            "in={} out={} cache_read={} cache_create={} cost=${:.4}",
             usage.input_tokens,
             usage.output_tokens,
             usage.cache_read_tokens,
             usage.cache_creation_tokens,
             usage.total_cost_usd,
-        ));
+        );
+        let file_line = format!("{} [session:{}] TOKENS: {}", ts, session_id, summary);
+
+        if self.output == LogOutput::File {
+            self.write_to_file(&file_line);
+        } else {
+            self.write_json_stdout(session_id, "tokens", &summary);
+            if self.output == LogOutput::Both {
+                self.write_to_file(&file_line);
+            }
+        }
     }
 
     pub fn log_session_event(&self, session_id: &str, event: &str) {
         let ts = Utc::now().to_rfc3339();
-        self.write_line(&format!(
-            "{} [session:{}] EVENT: {}",
-            ts, session_id, event
-        ));
+        let file_line = format!("{} [session:{}] EVENT: {}", ts, session_id, event);
+
+        if self.output == LogOutput::File {
+            self.write_to_file(&file_line);
+        } else {
+            self.write_json_stdout(session_id, "event", event);
+            if self.output == LogOutput::Both {
+                self.write_to_file(&file_line);
+            }
+        }
     }
 }
 
-/// Filter assistant text to keep only descriptive content
-/// Strips code blocks, command outputs, and keeps prose
 fn filter_assistant_text(text: &str) -> String {
     let mut result = Vec::new();
     let mut in_code_block = false;
@@ -127,7 +230,6 @@ fn filter_assistant_text(text: &str) -> String {
         if in_code_block {
             continue;
         }
-        // Skip command output lines
         if line.starts_with("$ ") || line.starts_with("> ") {
             continue;
         }
@@ -142,7 +244,7 @@ fn filter_assistant_text(text: &str) -> String {
 
 impl Default for ConversationLogger {
     fn default() -> Self {
-        Self::new(None)
+        Self::new(None, LogOutput::File)
     }
 }
 
@@ -162,5 +264,13 @@ mod tests {
         let input = "Running tests:\n$ cargo test\n> output line\nAll passed.";
         let result = filter_assistant_text(input);
         assert_eq!(result, "Running tests: All passed.");
+    }
+
+    #[test]
+    fn test_log_output_from_str() {
+        assert_eq!(LogOutput::from_str("file"), LogOutput::File);
+        assert_eq!(LogOutput::from_str("stdout"), LogOutput::Stdout);
+        assert_eq!(LogOutput::from_str("both"), LogOutput::Both);
+        assert_eq!(LogOutput::from_str("unknown"), LogOutput::File);
     }
 }

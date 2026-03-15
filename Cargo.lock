@@ -688,6 +688,7 @@ dependencies = [
  "chrono",
  "dirs",
  "keyring",
+ "libc",
  "nix",
  "rand",
  "regex",
