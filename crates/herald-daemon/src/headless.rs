@@ -38,11 +38,16 @@ fn resolve_claude_path() -> String {
 
 /// Execute a headless prompt, optionally continuing an existing session.
 /// Uses JSON output format when continuing a session for richer data extraction.
-pub async fn execute_prompt(prompt: &str, session_id: Option<&str>) -> Result<String> {
+pub async fn execute_prompt(prompt: &str, session_id: Option<&str>, cwd: Option<&str>) -> Result<String> {
     let claude_path = resolve_claude_path();
-    info!("Executing headless prompt (continue={:?}, claude={})", session_id.is_some(), claude_path);
+    info!("Executing headless prompt (continue={:?}, cwd={:?}, claude={})", session_id.is_some(), cwd, claude_path);
 
     let mut cmd = Command::new(&claude_path);
+
+    // Run in the session's working directory so --continue finds the right conversation
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
 
     // Prevent headless process from firing Herald hooks that would
     // overwrite and then destroy the original interactive session's registration

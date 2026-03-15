@@ -607,9 +607,10 @@ async fn handle_request(
             session_id,
             prompt,
         } => {
-            // Headless mode: use `claude --continue <session_id> -p <prompt>`
+            // Headless mode: use `claude --continue -p <prompt>` in session's CWD
+            let session_cwd = registry.get(&session_id).await.map(|s| s.cwd.to_string_lossy().to_string());
             let config = config.read().await;
-            match crate::headless::execute_prompt(&prompt, Some(&session_id)).await {
+            match crate::headless::execute_prompt(&prompt, Some(&session_id), session_cwd.as_deref()).await {
                 Ok(output) => {
                     info!("Headless output ({} chars): {}", output.len(), &output[..output.len().min(200)]);
                     let filtered = filter_content(&output, &config.output_filter);
