@@ -93,10 +93,23 @@ async fn handle_sessions(bot: Bot, msg: Message, state: BotState) -> ResponseRes
             } else {
                 ""
             };
+            let mut mode_flags = Vec::new();
+            if s.plan_mode {
+                mode_flags.push("P");
+            }
+            if s.bypass_permissions {
+                mode_flags.push("B");
+            }
+            let mode_str = if mode_flags.is_empty() {
+                String::new()
+            } else {
+                format!(" [{}]", mode_flags.join(","))
+            };
             text.push_str(&format!(
-                "{} ({}){}\n",
+                "{} ({}){}{}\n",
                 s.tag(),
                 s.cwd.split('/').last().unwrap_or(&s.cwd),
+                mode_str,
                 indicator
             ));
         }

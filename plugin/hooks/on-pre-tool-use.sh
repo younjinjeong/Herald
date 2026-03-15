@@ -16,7 +16,7 @@ fi
 
 herald_read_token "$SESSION_ID"
 
-# --- AskUserQuestion: notify-only, no blocking ---
+# --- AskUserQuestion: notify-only, no blocking (always, regardless of mode) ---
 if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
     QUESTION=$(echo "$INPUT" | jq -r '.tool_input.question // .tool_input // ""' | head -c 500)
 
@@ -37,6 +37,24 @@ if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
 
     herald_ipc_send_with_retry "$SESSION_ID" "$MSG" >/dev/null
     # Allow immediately — informational only
+    echo '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
+    exit 0
+fi
+
+# --- Query session modes ---
+MODE_MSG=$(jq -n --arg sid "$SESSION_ID" '{"type": "ModeQuery", "session_id": $sid}')
+MODE_RESPONSE=$(herald_ipc_send "$MODE_MSG" 2>/dev/null)
+PLAN_MODE=$(echo "$MODE_RESPONSE" | jq -r '.plan_mode // false' 2>/dev/null)
+BYPASS_PERMS=$(echo "$MODE_RESPONSE" | jq -r '.bypass_permissions // false' 2>/dev/null)
+
+# Plan mode: deny mutating tools
+if [ "$PLAN_MODE" = "true" ]; then
+    echo '{"hookSpecificOutput": {"permissionDecision": "deny", "permissionDecisionReason": "Session is in Plan mode — no edits allowed. Use /sessions in Telegram to disable Plan mode."}}'
+    exit 0
+fi
+
+# Bypass permissions: allow everything immediately, no Telegram prompt
+if [ "$BYPASS_PERMS" = "true" ]; then
     echo '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
     exit 0
 fi

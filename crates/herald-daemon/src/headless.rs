@@ -9,6 +9,10 @@ pub async fn execute_prompt(prompt: &str, session_id: Option<&str>) -> Result<St
 
     let mut cmd = Command::new("claude");
 
+    // Prevent headless process from firing Herald hooks that would
+    // overwrite and then destroy the original interactive session's registration
+    cmd.env("HERALD_HEADLESS", "1");
+
     if let Some(sid) = session_id {
         // Continue existing session with JSON output for richer parsing
         cmd.arg("--continue")

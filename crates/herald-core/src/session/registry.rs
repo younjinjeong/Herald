@@ -4,7 +4,7 @@ use tokio::sync::RwLock;
 use chrono::Utc;
 
 use crate::error::{HeraldError, Result};
-use crate::types::{ConversationEntry, SessionInfo, SessionInfoDto, TokenUsage};
+use crate::types::{ConversationEntry, SessionInfo, SessionInfoDto, SessionModes, TokenUsage};
 
 const MAX_CONVERSATION_LOG: usize = 50;
 
@@ -137,6 +137,18 @@ impl SessionRegistry {
                 session.conversation_log.remove(0);
             }
             session.last_activity = Utc::now();
+        }
+    }
+
+    pub async fn get_modes(&self, id: &str) -> Option<SessionModes> {
+        let sessions = self.sessions.read().await;
+        sessions.get(id).map(|s| s.modes.clone())
+    }
+
+    pub async fn update_modes(&self, id: &str, modes: SessionModes) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(id) {
+            session.modes = modes;
         }
     }
 

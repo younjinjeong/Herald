@@ -34,6 +34,12 @@ pub struct ConversationEntry {
     pub content: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SessionModes {
+    pub plan_mode: bool,
+    pub bypass_permissions: bool,
+}
+
 pub const SESSION_COLORS: &[&str] = &["\u{1f7e2}", "\u{1f7e1}", "\u{1f535}", "\u{1f7e3}", "\u{1f7e0}"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +59,8 @@ pub struct SessionInfo {
     pub conversation_log: Vec<ConversationEntry>,
     #[serde(default)]
     pub tmux_pane: Option<String>,
+    #[serde(default)]
+    pub modes: SessionModes,
 }
 
 impl SessionInfo {
@@ -83,6 +91,8 @@ pub struct SessionInfoDto {
     pub started_at: String,
     pub last_activity: String,
     pub token_usage: TokenUsage,
+    pub plan_mode: bool,
+    pub bypass_permissions: bool,
 }
 
 impl SessionInfoDto {
@@ -104,6 +114,8 @@ impl From<&SessionInfo> for SessionInfoDto {
             color_index: info.color_index,
             last_activity: info.last_activity.to_rfc3339(),
             token_usage: info.token_usage.clone(),
+            plan_mode: info.modes.plan_mode,
+            bypass_permissions: info.modes.bypass_permissions,
         }
     }
 }

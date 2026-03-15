@@ -1,6 +1,12 @@
 #!/bin/bash
 # Herald hooks: shared helper functions
 
+# Skip all Herald hooks when running inside headless execution
+# (prevents headless `claude --continue` from overwriting the original session)
+if [ "$HERALD_HEADLESS" = "1" ]; then
+    exit 0
+fi
+
 # Load config.env from plugin root (fallback for env vars)
 # CLAUDE_PLUGIN_ROOT is set by Claude Code when running hooks
 _herald_config="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/config.env}"

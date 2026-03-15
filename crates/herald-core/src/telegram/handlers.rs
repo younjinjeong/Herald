@@ -6,7 +6,7 @@ use crate::auth::otp::verify_otp;
 use crate::ipc::client::IpcClient;
 use crate::ipc::protocol::IpcRequest;
 use crate::telegram::bot::{enqueue_message, BotState};
-use crate::telegram::callbacks::parse_callback_data;
+use crate::telegram::callbacks::{build_session_actions_keyboard, parse_callback_data};
 use crate::telegram::formatting::escape_markdown_v2;
 use crate::types::SESSION_COLORS;
 
@@ -199,6 +199,7 @@ pub async fn callback_handler(
                     *active = Some(payload.to_string());
 
                     let tag = session.tag();
+                    let modes = session.modes.clone();
                     bot.answer_callback_query(&query.id)
                         .text(format!("Active: {}", tag))
                         .await?;
@@ -213,6 +214,12 @@ pub async fn callback_handler(
                             ),
                         )
                         .await?;
+
+                        // Show mode toggle buttons
+                        let keyboard = build_session_actions_keyboard(payload, &modes);
+                        bot.send_message(msg.chat().id, format!("{} Session modes:", tag))
+                            .reply_markup(keyboard)
+                            .await?;
                     }
                 } else {
                     bot.answer_callback_query(&query.id)
@@ -247,6 +254,55 @@ pub async fn callback_handler(
                 } else {
                     bot.answer_callback_query(&query.id)
                         .text("Request expired or not found")
+                        .await?;
+                }
+            }
+            "toggle_plan" | "toggle_bypass" => {
+                let session_id = payload;
+                if let Some(mut modes) = state.registry.get_modes(session_id).await {
+                    if action == "toggle_plan" {
+                        modes.plan_mode = !modes.plan_mode;
+                    } else {
+                        modes.bypass_permissions = !modes.bypass_permissions;
+                    }
+                    state
+                        .registry
+                        .update_modes(session_id, modes.clone())
+                        .await;
+
+                    let status = if action == "toggle_plan" {
+                        format!(
+                            "Plan mode: {}",
+                            if modes.plan_mode { "ON" } else { "OFF" }
+                        )
+                    } else {
+                        format!(
+                            "Bypass permissions: {}",
+                            if modes.bypass_permissions {
+                                "ON"
+                            } else {
+                                "OFF"
+                            }
+                        )
+                    };
+                    bot.answer_callback_query(&query.id)
+                        .text(&status)
+                        .await?;
+
+                    // Update the keyboard in-place
+                    if let Some(teloxide::types::MaybeInaccessibleMessage::Regular(msg)) =
+                        query.message
+                    {
+                        let keyboard =
+                            build_session_actions_keyboard(session_id, &modes);
+                        let _ = bot
+                            .edit_message_reply_markup(msg.chat.id, msg.id)
+                            .reply_markup(keyboard)
+                            .await;
+                    }
+                } else {
+                    bot.answer_callback_query(&query.id)
+                        .text("Session not found")
                         .await?;
                 }
             }

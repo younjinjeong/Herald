@@ -73,6 +73,14 @@ pub enum IpcRequest {
     PermissionCheck {
         request_id: String,
     },
+    ModeQuery {
+        session_id: String,
+    },
+    ModeUpdate {
+        session_id: String,
+        plan_mode: bool,
+        bypass_permissions: bool,
+    },
     Health,
     ListSessions,
     Shutdown,
@@ -101,6 +109,10 @@ pub enum IpcResponse {
     },
     PermissionResult {
         decision: String,
+    },
+    ModeResult {
+        plan_mode: bool,
+        bypass_permissions: bool,
     },
 }
 

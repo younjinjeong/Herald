@@ -19,7 +19,7 @@ use herald_core::telegram::formatting::{
     escape_markdown_v2, format_ask_user_question, format_completion, format_permission_request,
     format_session_end, format_session_start, format_working, split_message,
 };
-use herald_core::types::{ConversationEntry, SessionId, SessionInfo, SessionState, TokenUsage};
+use herald_core::types::{ConversationEntry, SessionId, SessionInfo, SessionModes, SessionState, TokenUsage};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
@@ -318,6 +318,7 @@ async fn handle_request(
                 token_usage: TokenUsage::default(),
                 conversation_log: Vec::new(),
                 tmux_pane,
+                modes: SessionModes::default(),
             };
             let tag = info.tag();
             match registry.register(info).await {
@@ -682,6 +683,16 @@ async fn handle_request(
                 return resp;
             }
 
+            // Bypass permissions: auto-allow without Telegram interaction
+            if let Some(modes) = registry.get_modes(&session_id).await {
+                if modes.bypass_permissions {
+                    info!("Bypass mode: auto-allowing {} for session {}", tool_name, session_id);
+                    return IpcResponse::PermissionResult {
+                        decision: "allow".to_string(),
+                    };
+                }
+            }
+
             let tag = registry.get_tag(&session_id).await;
 
             // Store pending permission
@@ -727,6 +738,41 @@ async fn handle_request(
                 IpcResponse::PermissionResult {
                     decision: "allow".to_string(),
                 }
+            }
+        }
+        IpcRequest::ModeQuery { session_id } => {
+            if let Some(modes) = registry.get_modes(&session_id).await {
+                IpcResponse::ModeResult {
+                    plan_mode: modes.plan_mode,
+                    bypass_permissions: modes.bypass_permissions,
+                }
+            } else {
+                IpcResponse::ModeResult {
+                    plan_mode: false,
+                    bypass_permissions: false,
+                }
+            }
+        }
+        IpcRequest::ModeUpdate {
+            session_id,
+            plan_mode,
+            bypass_permissions,
+        } => {
+            registry
+                .update_modes(
+                    &session_id,
+                    SessionModes {
+                        plan_mode,
+                        bypass_permissions,
+                    },
+                )
+                .await;
+            info!(
+                "Mode update for session {}: plan={}, bypass={}",
+                session_id, plan_mode, bypass_permissions
+            );
+            IpcResponse::Ok {
+                message: Some("Modes updated".to_string()),
             }
         }
         IpcRequest::Health => {
