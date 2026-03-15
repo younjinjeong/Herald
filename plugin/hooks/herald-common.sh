@@ -57,23 +57,44 @@ herald_read_token() {
     fi
 }
 
+# Find the Claude Code process PID by walking up the process tree.
+# Checks multiple possible process names and node cmdline.
+# Falls back to session leader or $PPID (never $$).
+herald_find_claude_pid() {
+    local walk_pid=$$
+    while [ "$walk_pid" -gt 1 ]; do
+        local comm
+        comm=$(ps -o comm= -p "$walk_pid" 2>/dev/null)
+        case "$comm" in
+            claude|claude-code|claude_code)
+                echo "$walk_pid"
+                return 0
+                ;;
+        esac
+        if [ "$comm" = "node" ] && [ -f "/proc/$walk_pid/cmdline" ]; then
+            if tr '\0' ' ' < "/proc/$walk_pid/cmdline" 2>/dev/null | grep -qi "claude"; then
+                echo "$walk_pid"
+                return 0
+            fi
+        fi
+        walk_pid=$(ps -o ppid= -p "$walk_pid" 2>/dev/null | tr -d ' ')
+    done
+    # Fallback: session leader PID, then $PPID (never $$)
+    local sid_pid
+    sid_pid=$(ps -o sid= -p $$ 2>/dev/null | tr -d ' ')
+    if [ -n "$sid_pid" ] && [ "$sid_pid" -gt 1 ] 2>/dev/null; then
+        echo "$sid_pid"
+    else
+        echo "$PPID"
+    fi
+}
+
 # Re-register the session with the daemon (e.g. after daemon restart)
 # Sets TOKEN variable on success
 herald_reregister() {
     local session_id="$1"
-    local pid="$$"
-
-    # Walk up to find claude process
-    local walk_pid=$pid
-    while [ "$walk_pid" -gt 1 ]; do
-        local parent_comm
-        parent_comm=$(ps -o comm= -p "$walk_pid" 2>/dev/null)
-        if [ "$parent_comm" = "claude" ]; then
-            pid=$walk_pid
-            break
-        fi
-        walk_pid=$(ps -o ppid= -p "$walk_pid" 2>/dev/null | tr -d ' ')
-    done
+    local pid
+    pid=$(herald_find_claude_pid)
 
     local cwd
     cwd=$(pwd)
