@@ -213,7 +213,7 @@ async fn handle_request(
             session_id,
             token,
             tool_name,
-            tool_input_summary: _,
+            tool_input_summary,
             tool_response_summary,
         } => {
             if !registry.validate_token(&session_id, &token).await {
@@ -226,14 +226,20 @@ async fn handle_request(
             let tag = registry.get_tag(&session_id).await;
 
             let config = config.read().await;
-            let filtered =
+            let filtered_response =
                 filter_content(&tool_response_summary, &config.output_filter);
+            let filtered_input =
+                filter_content(&tool_input_summary, &config.output_filter);
             let tool_text = format_tool_output(
                 &tool_name,
-                &filtered,
+                &filtered_response,
                 config.output_filter.code_preview_lines,
             );
-            let text = format!("{}\n{}", tag, tool_text);
+            let text = if filtered_input.is_empty() {
+                format!("{}\n{}", tag, tool_text)
+            } else {
+                format!("{}\n{}\nInput: {}", tag, tool_text, filtered_input)
+            };
             for &chat_id in &config.auth.allowed_chat_ids {
                 enqueue_message(
                     queue_tx,
@@ -280,7 +286,7 @@ async fn handle_request(
         IpcRequest::SessionStopped {
             session_id,
             token,
-            last_message: _,
+            last_message,
         } => {
             if !registry.validate_token(&session_id, &token).await {
                 return IpcResponse::Error {
@@ -292,17 +298,51 @@ async fn handle_request(
             let _ = registry.unregister(&session_id).await;
 
             let config = config.read().await;
-            let text = format!("{} Session stopped.", tag);
+            let text = if last_message.is_empty() {
+                format!("{} Session stopped.", tag)
+            } else {
+                let truncated = if last_message.len() > 200 {
+                    format!("{}...", &last_message[..200])
+                } else {
+                    last_message
+                };
+                format!("{} Session stopped.\nLast: {}", tag, truncated)
+            };
             for &chat_id in &config.auth.allowed_chat_ids {
                 enqueue_message(queue_tx, chat_id, text.clone(), None).await;
             }
             IpcResponse::Ok { message: None }
         }
         IpcRequest::Input {
-            session_id: _,
+            session_id,
             prompt,
         } => {
-            // Execute via headless mode
+            // Try PTY injection if session has a live PID, otherwise use headless
+            if let Some(session) = registry.get(&session_id).await {
+                if crate::pty::is_process_alive(session.pid) {
+                    match crate::pty::inject_input(session.pid, &prompt) {
+                        Ok(()) => {
+                            let tag = registry.get_tag(&session_id).await;
+                            let config = config.read().await;
+                            for &chat_id in &config.auth.allowed_chat_ids {
+                                enqueue_message(
+                                    queue_tx, chat_id,
+                                    format!("{} Input injected via PTY", tag),
+                                    None,
+                                ).await;
+                            }
+                            return IpcResponse::Ok {
+                                message: Some("Input injected via PTY".to_string()),
+                            };
+                        }
+                        Err(e) => {
+                            tracing::warn!("PTY injection failed, falling back to headless: {}", e);
+                        }
+                    }
+                }
+            }
+
+            // Fallback: headless mode
             let config = config.read().await;
             match crate::headless::execute_prompt(&prompt).await {
                 Ok(output) => {

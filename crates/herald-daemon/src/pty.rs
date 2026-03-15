@@ -2,7 +2,6 @@ use anyhow::Result;
 
 /// Inject input into a running process's stdin via /proc (Linux only)
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub fn inject_input(pid: u32, input: &str) -> Result<()> {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -31,14 +30,11 @@ pub fn inject_input(_pid: u32, _input: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "linux")]
-#[allow(dead_code)]
 pub fn is_process_alive(pid: u32) -> bool {
     std::path::Path::new(&format!("/proc/{}/stat", pid)).exists()
 }
 
 #[cfg(not(target_os = "linux"))]
-#[allow(dead_code)]
 pub fn is_process_alive(pid: u32) -> bool {
-    // Use kill(pid, 0) to check if process exists
     unsafe { libc::kill(pid as i32, 0) == 0 }
 }

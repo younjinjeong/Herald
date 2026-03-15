@@ -53,34 +53,33 @@ impl ConversationLogger {
         }
     }
 
-    #[allow(dead_code)]
-    fn write_line(&self, line: &str) {
-        // Stdout output (for containers/Loki)
-        if self.output == LogOutput::Stdout || self.output == LogOutput::Both {
-            println!("{}", line);
-        }
-
-        // File output
-        if self.output == LogOutput::File || self.output == LogOutput::Both {
-            self.write_to_file(line);
+    /// Write a structured log entry to configured outputs (file, stdout JSON, or both)
+    fn write_entry(&self, session_id: &str, log_type: &str, file_line: &str, content: &str) {
+        match self.output {
+            LogOutput::File => {
+                self.write_to_file(file_line);
+            }
+            LogOutput::Stdout => {
+                self.write_json_stdout(session_id, log_type, content);
+            }
+            LogOutput::Both => {
+                self.write_json_stdout(session_id, log_type, content);
+                self.write_to_file(file_line);
+            }
         }
     }
 
-    /// Write structured JSON to stdout (Loki/Promtail friendly)
     fn write_json_stdout(&self, session_id: &str, log_type: &str, content: &str) {
-        if self.output == LogOutput::Stdout || self.output == LogOutput::Both {
-            let json = serde_json::json!({
-                "ts": Utc::now().to_rfc3339(),
-                "session": session_id,
-                "type": log_type,
-                "content": content,
-            });
-            println!("{}", json);
-        }
+        let json = serde_json::json!({
+            "ts": Utc::now().to_rfc3339(),
+            "session": session_id,
+            "type": log_type,
+            "content": content,
+        });
+        println!("{}", json);
     }
 
     fn write_to_file(&self, line: &str) {
-        // Ensure parent directory exists
         if let Some(parent) = std::path::Path::new(&self.log_path).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -124,19 +123,10 @@ impl ConversationLogger {
         let ts = Utc::now().to_rfc3339();
         let file_line = format!(
             "{} [session:{}] USER: {}",
-            ts,
-            session_id,
+            ts, session_id,
             content.replace('\n', " ")
         );
-
-        if self.output == LogOutput::File {
-            self.write_to_file(&file_line);
-        } else {
-            self.write_json_stdout(session_id, "user_prompt", content);
-            if self.output == LogOutput::Both {
-                self.write_to_file(&file_line);
-            }
-        }
+        self.write_entry(session_id, "user_prompt", &file_line, content);
     }
 
     pub fn log_assistant_response(&self, session_id: &str, content: &str) {
@@ -144,42 +134,23 @@ impl ConversationLogger {
         if filtered.is_empty() {
             return;
         }
-
         let ts = Utc::now().to_rfc3339();
         let file_line = format!(
             "{} [session:{}] CLAUDE: {}",
-            ts,
-            session_id,
+            ts, session_id,
             filtered.replace('\n', " ")
         );
-
-        if self.output == LogOutput::File {
-            self.write_to_file(&file_line);
-        } else {
-            self.write_json_stdout(session_id, "assistant_response", &filtered);
-            if self.output == LogOutput::Both {
-                self.write_to_file(&file_line);
-            }
-        }
+        self.write_entry(session_id, "assistant_response", &file_line, &filtered);
     }
 
     pub fn log_tool_summary(&self, session_id: &str, content: &str) {
         let ts = Utc::now().to_rfc3339();
         let file_line = format!(
             "{} [session:{}] TOOL: {}",
-            ts,
-            session_id,
+            ts, session_id,
             content.replace('\n', " ")
         );
-
-        if self.output == LogOutput::File {
-            self.write_to_file(&file_line);
-        } else {
-            self.write_json_stdout(session_id, "tool_summary", content);
-            if self.output == LogOutput::Both {
-                self.write_to_file(&file_line);
-            }
-        }
+        self.write_entry(session_id, "tool_summary", &file_line, content);
     }
 
     pub fn log_token_usage(&self, session_id: &str, usage: &TokenUsage) {
@@ -193,29 +164,13 @@ impl ConversationLogger {
             usage.total_cost_usd,
         );
         let file_line = format!("{} [session:{}] TOKENS: {}", ts, session_id, summary);
-
-        if self.output == LogOutput::File {
-            self.write_to_file(&file_line);
-        } else {
-            self.write_json_stdout(session_id, "tokens", &summary);
-            if self.output == LogOutput::Both {
-                self.write_to_file(&file_line);
-            }
-        }
+        self.write_entry(session_id, "tokens", &file_line, &summary);
     }
 
     pub fn log_session_event(&self, session_id: &str, event: &str) {
         let ts = Utc::now().to_rfc3339();
         let file_line = format!("{} [session:{}] EVENT: {}", ts, session_id, event);
-
-        if self.output == LogOutput::File {
-            self.write_to_file(&file_line);
-        } else {
-            self.write_json_stdout(session_id, "event", event);
-            if self.output == LogOutput::Both {
-                self.write_to_file(&file_line);
-            }
-        }
+        self.write_entry(session_id, "event", &file_line, event);
     }
 }
 
