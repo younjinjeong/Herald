@@ -5,10 +5,14 @@ use crate::types::SessionInfoDto;
 pub fn build_session_keyboard(sessions: &[SessionInfoDto]) -> InlineKeyboardMarkup {
     let buttons: Vec<Vec<InlineKeyboardButton>> = sessions
         .iter()
-        .enumerate()
-        .map(|(i, s)| {
+        .map(|s| {
+            let label = format!(
+                "{} {}",
+                s.tag(),
+                s.cwd.split('/').last().unwrap_or(&s.cwd)
+            );
             vec![InlineKeyboardButton::callback(
-                format!("#{} {}", i + 1, s.cwd.split('/').last().unwrap_or(&s.cwd)),
+                label,
                 format!("select_session:{}", s.id),
             )]
         })

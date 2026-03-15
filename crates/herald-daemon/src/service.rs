@@ -149,23 +149,28 @@ async fn handle_request(
             cwd,
         } => {
             let token = generate_token();
+            let display_name = SessionInfo::name_from_cwd(&cwd);
+            let color_index = registry.next_color();
             let info = SessionInfo {
                 id: SessionId(session_id.clone()),
                 token: token.clone(),
                 pid,
                 cwd: cwd.clone().into(),
+                display_name: display_name.clone(),
+                color_index,
                 state: SessionState::Active,
                 started_at: chrono::Utc::now(),
                 last_activity: chrono::Utc::now(),
                 token_usage: TokenUsage::default(),
                 conversation_log: Vec::new(),
             };
+            let tag = info.tag();
             match registry.register(info).await {
                 Ok(()) => {
                     info!("Session registered: {} (PID {})", session_id, pid);
-                    // Notify Telegram
+                    logger.log_session_event(&session_id, &format!("started ({})", cwd));
                     let config = config.read().await;
-                    let text = format!("New session started: {}\nDir: {}", session_id, cwd);
+                    let text = format!("{} Session started\nDir: {}", tag, cwd);
                     for &chat_id in &config.auth.allowed_chat_ids {
                         enqueue_message(queue_tx, chat_id, text.clone(), None).await;
                     }
@@ -184,11 +189,13 @@ async fn handle_request(
                     message: "Invalid session token".to_string(),
                 };
             }
+            let tag = registry.get_tag(&session_id).await;
             match registry.unregister(&session_id).await {
                 Ok(()) => {
                     info!("Session unregistered: {}", session_id);
+                    logger.log_session_event(&session_id, "ended");
                     let config = config.read().await;
-                    let text = format!("Session ended: {}", session_id);
+                    let text = format!("{} Session ended", tag);
                     for &chat_id in &config.auth.allowed_chat_ids {
                         enqueue_message(queue_tx, chat_id, text.clone(), None).await;
                     }
@@ -216,15 +223,17 @@ async fn handle_request(
                 };
             }
             registry.update_activity(&session_id).await;
+            let tag = registry.get_tag(&session_id).await;
 
             let config = config.read().await;
             let filtered =
                 filter_content(&tool_response_summary, &config.output_filter);
-            let text = format_tool_output(
+            let tool_text = format_tool_output(
                 &tool_name,
                 &filtered,
                 config.output_filter.code_preview_lines,
             );
+            let text = format!("{}\n{}", tag, tool_text);
             for &chat_id in &config.auth.allowed_chat_ids {
                 enqueue_message(
                     queue_tx,
@@ -249,9 +258,11 @@ async fn handle_request(
                 };
             }
 
+            let tag = registry.get_tag(&session_id).await;
             let config = config.read().await;
             let text = format!(
-                "Notification [{}]:\n{}",
+                "{} Notification [{}]:\n{}",
+                tag,
                 escape_markdown_v2(&notification_type),
                 escape_markdown_v2(&message)
             );
@@ -277,10 +288,11 @@ async fn handle_request(
                     message: "Invalid session token".to_string(),
                 };
             }
+            let tag = registry.get_tag(&session_id).await;
             let _ = registry.unregister(&session_id).await;
 
             let config = config.read().await;
-            let text = format!("Session {} stopped.", session_id);
+            let text = format!("{} Session stopped.", tag);
             for &chat_id in &config.auth.allowed_chat_ids {
                 enqueue_message(queue_tx, chat_id, text.clone(), None).await;
             }
@@ -336,15 +348,16 @@ async fn handle_request(
             logger.log_token_usage(&session_id, &usage);
 
             // Send live-updating token message to Telegram
+            let tag = registry.get_tag(&session_id).await;
             let config = config.read().await;
             let text = format!(
-                "\u{1f4ca} Session: {}\n\
+                "{} \u{1f4ca} Tokens\n\
                  \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
                  Tokens: {} in / {} out\n\
                  Cache:  {} read / {} created\n\
                  Cost:   ${:.4}\n\
                  Updated: {}",
-                session_id,
+                tag,
                 format_num(input_tokens),
                 format_num(output_tokens),
                 format_num(cache_read_tokens),
@@ -384,12 +397,13 @@ async fn handle_request(
 
             registry.add_conversation_entry(&session_id, entry).await;
 
-            // Log to file
+            // Log to file and send to Telegram with session tag
+            let tag = registry.get_tag(&session_id).await;
             match entry_type.as_str() {
                 "user_prompt" => {
                     logger.log_user_prompt(&session_id, &content);
                     let config = config.read().await;
-                    let text = format!("\u{1f464} You: \"{}\"", &content);
+                    let text = format!("{} \u{1f464} You: \"{}\"", tag, &content);
                     for &chat_id in &config.auth.allowed_chat_ids {
                         enqueue_message(queue_tx, chat_id, text.clone(), None).await;
                     }
@@ -397,13 +411,12 @@ async fn handle_request(
                 "assistant_response" => {
                     logger.log_assistant_response(&session_id, &content);
                     let config = config.read().await;
-                    // Truncate long responses
                     let display = if content.len() > 500 {
                         format!("{}...", &content[..500])
                     } else {
                         content.clone()
                     };
-                    let text = format!("\u{1f916} Claude: {}", display);
+                    let text = format!("{} \u{1f916} Claude: {}", tag, display);
                     for &chat_id in &config.auth.allowed_chat_ids {
                         enqueue_message(queue_tx, chat_id, text.clone(), None).await;
                     }

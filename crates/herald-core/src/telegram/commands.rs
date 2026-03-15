@@ -5,7 +5,7 @@ use teloxide::utils::command::BotCommands;
 use crate::auth::chat_id::is_authorized;
 use crate::telegram::bot::BotState;
 use crate::telegram::callbacks::build_session_keyboard;
-use crate::telegram::formatting::{format_session_list, format_status};
+use crate::telegram::formatting::format_status;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Herald commands:")]
@@ -81,10 +81,27 @@ async fn handle_sessions(bot: Bot, msg: Message, state: BotState) -> ResponseRes
         bot.send_message(msg.chat.id, "No active Claude Code sessions.")
             .await?;
     } else {
+        let active = state.active_session.lock().await;
+        let active_id = active.clone();
+        drop(active);
+
         let keyboard = build_session_keyboard(&sessions);
-        let text = format_session_list(&sessions);
+        let mut text = "Active Sessions:\n\n".to_string();
+        for s in &sessions {
+            let indicator = if active_id.as_deref() == Some(&s.id) {
+                " \u{25c0} active"
+            } else {
+                ""
+            };
+            text.push_str(&format!(
+                "{} ({}){}\n",
+                s.tag(),
+                s.cwd.split('/').last().unwrap_or(&s.cwd),
+                indicator
+            ));
+        }
+        text.push_str("\nTap a session to select it.\nTip: @name or reply to target a session.");
         bot.send_message(msg.chat.id, text)
-            .parse_mode(ParseMode::MarkdownV2)
             .reply_markup(keyboard)
             .await?;
     }
@@ -227,13 +244,15 @@ fn format_number(n: u64) -> String {
 async fn handle_help(bot: Bot, msg: Message, _state: BotState) -> ResponseResult<()> {
     let help_text = "Herald Commands:\n\n\
         /start - Connect to Herald\n\
-        /sessions - List active Claude Code sessions\n\
+        /sessions - List active sessions (tap to select)\n\
         /status - Show daemon status\n\
         /tokens - Show token usage across sessions\n\
         /log - Show recent conversation log\n\
         /help - Show this help\n\n\
-        Send any text message to forward it as a prompt \
-        to the selected Claude Code session.";
+        Sending prompts:\n\
+        \u{2022} Type text \u{2192} sends to active session\n\
+        \u{2022} @session_name text \u{2192} sends to named session\n\
+        \u{2022} Reply to a session message \u{2192} sends to that session";
 
     bot.send_message(msg.chat.id, help_text).await?;
     Ok(())

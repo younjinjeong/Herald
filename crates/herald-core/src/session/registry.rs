@@ -11,19 +11,45 @@ const MAX_CONVERSATION_LOG: usize = 50;
 #[derive(Debug, Clone)]
 pub struct SessionRegistry {
     sessions: Arc<RwLock<HashMap<String, SessionInfo>>>,
+    color_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl SessionRegistry {
     pub fn new() -> Self {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            color_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Get next color index for a new session
+    pub fn next_color(&self) -> usize {
+        self.color_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     pub async fn register(&self, info: SessionInfo) -> Result<()> {
         let mut sessions = self.sessions.write().await;
         sessions.insert(info.id.0.clone(), info);
         Ok(())
+    }
+
+    /// Find a session by display_name (for @-prefix routing)
+    pub async fn find_by_name(&self, name: &str) -> Option<SessionInfo> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .values()
+            .find(|s| s.display_name == name)
+            .cloned()
+    }
+
+    /// Get the session tag (color + name) for a session ID
+    pub async fn get_tag(&self, id: &str) -> String {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(id)
+            .map(|s| s.tag())
+            .unwrap_or_else(|| format!("[{}]", id))
     }
 
     pub async fn unregister(&self, id: &str) -> Result<()> {
