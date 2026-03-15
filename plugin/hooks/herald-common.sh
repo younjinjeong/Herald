@@ -108,10 +108,10 @@ herald_ipc_send_with_retry() {
     local response
     response=$(herald_ipc_send "$msg")
 
-    # Check for 401 (invalid token — daemon was likely restarted)
+    # Check for 401 (invalid token) or 410 (session not registered) — daemon was likely restarted
     local error_code
     error_code=$(echo "$response" | jq -r '.code // empty' 2>/dev/null)
-    if [ "$error_code" = "401" ]; then
+    if [ "$error_code" = "401" ] || [ "$error_code" = "410" ]; then
         # Re-register to get a new token
         if herald_reregister "$session_id"; then
             # Update the token in the message and retry

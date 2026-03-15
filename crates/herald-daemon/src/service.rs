@@ -266,6 +266,13 @@ async fn validate_token(
     context: &str,
 ) -> std::result::Result<(), IpcResponse> {
     if skip_token_auth(conn_info) {
+        // Unix: skip token check but verify session exists in registry
+        if registry.get(session_id).await.is_none() {
+            return Err(IpcResponse::Error {
+                code: 410,
+                message: "Session not registered".to_string(),
+            });
+        }
         return Ok(());
     }
     match token {
@@ -318,7 +325,10 @@ async fn handle_request(
                 token_usage: TokenUsage::default(),
                 conversation_log: Vec::new(),
                 tmux_pane,
-                modes: SessionModes::default(),
+                modes: SessionModes {
+                    bypass_permissions: config.read().await.sessions.default_bypass_permissions,
+                    ..Default::default()
+                },
             };
             let tag = info.tag();
             match registry.register(info).await {
@@ -747,9 +757,10 @@ async fn handle_request(
                     bypass_permissions: modes.bypass_permissions,
                 }
             } else {
+                let cfg = config.read().await;
                 IpcResponse::ModeResult {
                     plan_mode: false,
-                    bypass_permissions: false,
+                    bypass_permissions: cfg.sessions.default_bypass_permissions,
                 }
             }
         }

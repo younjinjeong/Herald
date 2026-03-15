@@ -94,6 +94,8 @@ pub struct SessionsConfig {
     pub auto_cleanup_minutes: u64,
     #[serde(default = "default_debounce_seconds")]
     pub debounce_seconds: u64,
+    #[serde(default)]
+    pub default_bypass_permissions: bool,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -258,6 +260,7 @@ impl Default for SessionsConfig {
             max_concurrent: default_max_concurrent(),
             auto_cleanup_minutes: default_auto_cleanup_minutes(),
             debounce_seconds: default_debounce_seconds(),
+            default_bypass_permissions: false,
         }
     }
 }

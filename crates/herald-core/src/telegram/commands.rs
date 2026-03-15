@@ -20,6 +20,8 @@ pub enum HeraldCommand {
     Tokens,
     #[command(description = "Show recent conversation log")]
     Log,
+    #[command(description = "Toggle global bypass permissions default")]
+    Bypass,
     #[command(description = "Show help")]
     Help,
 }
@@ -36,6 +38,7 @@ pub async fn command_handler(
         HeraldCommand::Status => handle_status(bot, msg, state).await,
         HeraldCommand::Tokens => handle_tokens(bot, msg, state).await,
         HeraldCommand::Log => handle_log(bot, msg, state).await,
+        HeraldCommand::Bypass => handle_bypass(bot, msg, state).await,
         HeraldCommand::Help => handle_help(bot, msg, state).await,
     }
 }
@@ -254,6 +257,53 @@ fn format_number(n: u64) -> String {
     }
 }
 
+async fn handle_bypass(bot: Bot, msg: Message, state: BotState) -> ResponseResult<()> {
+    let config = state.config.read().await;
+    if !is_authorized(&config, msg.chat.id.0) {
+        bot.send_message(msg.chat.id, "Unauthorized.").await?;
+        return Ok(());
+    }
+    drop(config);
+
+    // Toggle the global default
+    let new_value = {
+        let mut config = state.config.write().await;
+        config.sessions.default_bypass_permissions = !config.sessions.default_bypass_permissions;
+        config.sessions.default_bypass_permissions
+    };
+
+    // Persist to disk
+    {
+        let config = state.config.read().await;
+        if let Err(e) = config.save(&state.config_path) {
+            tracing::warn!("Failed to save config: {}", e);
+            bot.send_message(
+                msg.chat.id,
+                format!(
+                    "Bypass permissions default: {} (failed to save: {})",
+                    if new_value { "ON" } else { "OFF" },
+                    e
+                ),
+            )
+            .await?;
+            return Ok(());
+        }
+    }
+
+    let status = if new_value {
+        "ON — new sessions will bypass permission requests by default"
+    } else {
+        "OFF — new sessions will prompt for permissions"
+    };
+    bot.send_message(
+        msg.chat.id,
+        format!("Bypass permissions default: {}", status),
+    )
+    .await?;
+
+    Ok(())
+}
+
 async fn handle_help(bot: Bot, msg: Message, _state: BotState) -> ResponseResult<()> {
     let help_text = "Herald Commands:\n\n\
         /start - Connect to Herald\n\
@@ -261,6 +311,7 @@ async fn handle_help(bot: Bot, msg: Message, _state: BotState) -> ResponseResult
         /status - Show daemon status\n\
         /tokens - Show token usage across sessions\n\
         /log - Show recent conversation log\n\
+        /bypass - Toggle global bypass permissions default\n\
         /help - Show this help\n\n\
         Sending prompts:\n\
         \u{2022} Type text \u{2192} sends to active session\n\
