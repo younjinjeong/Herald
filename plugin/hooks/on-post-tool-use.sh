@@ -34,7 +34,7 @@ fi
 # Extract token usage from transcript (if available)
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     # Get the last line with usage data
-    USAGE_LINE=$(tac "$TRANSCRIPT" 2>/dev/null | grep -m1 '"usage"' || true)
+    USAGE_LINE=$(grep '"usage"' "$TRANSCRIPT" 2>/dev/null | tail -1 || true)
     if [ -n "$USAGE_LINE" ]; then
         INPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.usage.input_tokens // 0' 2>/dev/null || echo 0)
         OUTPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.usage.output_tokens // 0' 2>/dev/null || echo 0)

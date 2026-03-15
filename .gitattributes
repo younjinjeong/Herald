@@ -1,0 +1,5 @@
+# Shell scripts must keep LF endings on all platforms (CRLF breaks shebang)
+*.sh text eol=lf
+
+# JSON config files - LF for consistency
+plugin/hooks/*.json text eol=lf
