@@ -5,6 +5,8 @@ Wants=network-online.target
 
 [Service]
 Type=notify
+ExecStartPre=/bin/mkdir -p %t/herald
+ExecStartPre=/bin/mkdir -p %h/.config/herald
 ExecStart=%h/.local/bin/heraldd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
@@ -15,7 +17,6 @@ Environment=RUST_LOG=info
 # Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=read-only
 ReadWritePaths=%h/.config/herald %t/herald
 PrivateTmp=yes
 

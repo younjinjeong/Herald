@@ -299,34 +299,80 @@ impl HeraldConfig {
     }
 
     pub fn get_bot_token(&self) -> Result<String> {
+        // 1. Environment variable (highest priority)
         if let Ok(token) = std::env::var("HERALD_BOT_TOKEN") {
             return Ok(token);
         }
 
-        match self.credentials.storage.as_str() {
-            "keyring" => {
-                let entry = keyring::Entry::new("herald", "bot_token")
-                    .map_err(|e| HeraldError::Config(format!("Keyring error: {}", e)))?;
-                entry
-                    .get_password()
-                    .map_err(|e| HeraldError::Config(format!("Bot token not found in keyring: {}", e)))
+        // 2. Try keyring
+        if self.credentials.storage == "keyring" || self.credentials.storage == "auto" {
+            if let Ok(entry) = keyring::Entry::new("herald", "bot_token") {
+                if let Ok(token) = entry.get_password() {
+                    if !token.is_empty() {
+                        return Ok(token);
+                    }
+                }
             }
-            "env" => Err(HeraldError::Config(
-                "HERALD_BOT_TOKEN environment variable not set".to_string(),
-            )),
-            _ => Err(HeraldError::Config(format!(
-                "Unknown credential storage: {}",
-                self.credentials.storage
-            ))),
         }
+
+        // 3. Fallback: read from token file
+        let token_path = Self::token_file_path();
+        if token_path.exists() {
+            let token = std::fs::read_to_string(&token_path)
+                .map_err(|e| HeraldError::Config(format!("Failed to read token file: {}", e)))?;
+            let token = token.trim().to_string();
+            if !token.is_empty() {
+                return Ok(token);
+            }
+        }
+
+        Err(HeraldError::Config(
+            "Bot token not found. Run `herald setup` or set HERALD_BOT_TOKEN env var.".to_string(),
+        ))
     }
 
     pub fn set_bot_token(token: &str) -> Result<()> {
-        let entry = keyring::Entry::new("herald", "bot_token")
-            .map_err(|e| HeraldError::Config(format!("Keyring error: {}", e)))?;
-        entry
-            .set_password(token)
-            .map_err(|e| HeraldError::Config(format!("Failed to store token: {}", e)))?;
+        // Try keyring first
+        let keyring_ok = if let Ok(entry) = keyring::Entry::new("herald", "bot_token") {
+            // Test if keyring actually works by trying a set+get round-trip
+            if entry.set_password(token).is_ok() {
+                // Verify it persisted (catches mock backends)
+                entry.get_password().map(|t| t == token).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if keyring_ok {
+            tracing::info!("Bot token stored in system keyring");
+            return Ok(());
+        }
+
+        // Fallback: store in file with restricted permissions
+        tracing::warn!("System keyring not available, storing token in file");
+        let token_path = Self::token_file_path();
+        if let Some(parent) = token_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&token_path, token)?;
+
+        // Set file permissions to owner-only (0600)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+
+        tracing::info!("Bot token stored in {}", token_path.display());
         Ok(())
+    }
+
+    fn token_file_path() -> PathBuf {
+        dirs::config_dir()
+            .unwrap_or_else(|| PathBuf::from("~/.config"))
+            .join("herald")
+            .join(".bot_token")
     }
 }

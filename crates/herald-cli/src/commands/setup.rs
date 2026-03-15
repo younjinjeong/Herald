@@ -33,10 +33,10 @@ pub async fn run() -> Result<()> {
     let bot_username = me.username();
     println!("  Bot: @{}", bot_username);
 
-    // Step 3: Store in keyring
+    // Step 3: Store token
     print_step(3, 4, "Storing bot token securely");
     HeraldConfig::set_bot_token(&token)?;
-    println!("  Stored in system keyring");
+    println!("  Token stored");
 
     // Step 4: OTP verification
     print_step(4, 4, "Authentication");
