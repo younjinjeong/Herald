@@ -306,12 +306,13 @@ impl HeraldConfig {
 
         // 2. Try keyring
         if self.credentials.storage == "keyring" || self.credentials.storage == "auto" {
-            if let Ok(entry) = keyring::Entry::new("herald", "bot_token") {
-                if let Ok(token) = entry.get_password() {
-                    if !token.is_empty() {
-                        return Ok(token);
-                    }
-                }
+            match keyring::Entry::new("herald", "bot_token") {
+                Ok(entry) => match entry.get_password() {
+                    Ok(token) if !token.is_empty() => return Ok(token),
+                    Ok(_) => tracing::debug!("Keyring entry exists but token is empty"),
+                    Err(e) => tracing::debug!("Keyring access failed: {}", e),
+                },
+                Err(e) => tracing::debug!("Keyring entry creation failed: {}", e),
             }
         }
 
@@ -347,11 +348,11 @@ impl HeraldConfig {
 
         if keyring_ok {
             tracing::info!("Bot token stored in system keyring");
-            return Ok(());
+        } else {
+            tracing::warn!("System keyring not available, storing token in file only");
         }
 
-        // Fallback: store in file with restricted permissions
-        tracing::warn!("System keyring not available, storing token in file");
+        // Always write token file as fallback (daemon may not have D-Bus session access)
         let token_path = Self::token_file_path();
         if let Some(parent) = token_path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -365,7 +366,7 @@ impl HeraldConfig {
             std::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o600))?;
         }
 
-        tracing::info!("Bot token stored in {}", token_path.display());
+        tracing::info!("Bot token file written to {}", token_path.display());
         Ok(())
     }
 

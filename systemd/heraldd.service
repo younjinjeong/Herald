@@ -5,14 +5,16 @@ Wants=network-online.target
 
 [Service]
 Type=notify
-ExecStartPre=/bin/mkdir -p %t/herald
-ExecStartPre=/bin/mkdir -p %h/.config/herald
 ExecStart=%h/.local/bin/heraldd
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 WatchdogSec=30
 Environment=RUST_LOG=info
+
+# Systemd creates these dirs before namespace setup, avoiding NAMESPACE errors
+RuntimeDirectory=herald
+ConfigurationDirectory=herald
 
 # Security hardening
 NoNewPrivileges=yes
