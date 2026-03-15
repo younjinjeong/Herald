@@ -399,7 +399,7 @@ async fn handle_request(
             session_id,
             token,
             tool_name,
-            tool_input_summary: _,
+            tool_input_summary,
             tool_response_summary: _,
         } => {
             if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "Output").await {
@@ -407,7 +407,31 @@ async fn handle_request(
             }
             registry.update_activity(&session_id).await;
 
-            // Increment tool count and reset debounce timer (suppress output to Telegram)
+            // Send compact tool activity to Telegram
+            {
+                let tag = registry.get_tag(&session_id).await;
+                let input_preview: String = tool_input_summary
+                    .lines().next().unwrap_or("")
+                    .chars().take(100).collect();
+                let text = if input_preview.is_empty() {
+                    format!("{} \u{2699}\u{fe0f} `{}`",
+                        escape_markdown_v2(&tag),
+                        escape_markdown_v2(&tool_name),
+                    )
+                } else {
+                    format!("{} \u{2699}\u{fe0f} `{}`\n> {}",
+                        escape_markdown_v2(&tag),
+                        escape_markdown_v2(&tool_name),
+                        escape_markdown_v2(&input_preview),
+                    )
+                };
+                let config = config.read().await;
+                for &chat_id in &config.auth.allowed_chat_ids {
+                    enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
+                }
+            }
+
+            // Increment tool count and reset debounce timer
             let mut act = activity.lock().await;
             let state = act.entry(session_id.clone()).or_insert_with(|| {
                 info!("Output before user_prompt for session {} (tool: {}), creating activity state", session_id, tool_name);
