@@ -2,7 +2,7 @@
 # Herald hook: SessionEnd
 # Unregisters a Claude Code session from the Herald daemon
 
-source "/home/younjinjeong/.config/herald/plugin/hooks/herald-common.sh"
+source "$(dirname "$0")/herald-common.sh"
 
 INPUT=$(cat)
 
@@ -12,23 +12,25 @@ if [ -z "$SESSION_ID" ]; then
     exit 0
 fi
 
-# Read persisted token from file
-TOKEN_FILE="/tmp/herald/tokens/$SESSION_ID"
-TOKEN=""
-if [ -f "$TOKEN_FILE" ]; then
-    TOKEN=$(cat "$TOKEN_FILE")
+# Read token (only needed for TCP transport)
+herald_read_token "$SESSION_ID"
+
+if herald_is_unix_transport; then
+    # Unix transport: no token needed (peercred auth)
+    MSG=$(jq -n \
+        --arg sid "$SESSION_ID" \
+        '{"type": "Unregister", "session_id": $sid}')
+else
+    if [ -z "$TOKEN" ]; then
+        exit 0
+    fi
+    MSG=$(jq -n \
+        --arg sid "$SESSION_ID" \
+        --arg token "$TOKEN" \
+        '{"type": "Unregister", "session_id": $sid, "token": $token}')
 fi
 
-if [ -z "$TOKEN" ]; then
-    exit 0
-fi
+herald_ipc_send_with_retry "$SESSION_ID" "$MSG" >/dev/null
 
-MSG=$(jq -n \
-    --arg sid "$SESSION_ID" \
-    --arg token "$TOKEN" \
-    '{"type": "Unregister", "session_id": $sid, "token": $token}')
-
-herald_ipc_send "$MSG" >/dev/null
-
-# Clean up token file
-rm -f "$TOKEN_FILE" 2>/dev/null
+# Clean up token file (if it exists)
+rm -f "/tmp/herald/tokens/$SESSION_ID" 2>/dev/null

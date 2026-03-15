@@ -56,6 +56,18 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|NotebookEdit|AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/on-pre-tool-use.sh",
+            "timeout": 35
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

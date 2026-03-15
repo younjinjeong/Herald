@@ -6,6 +6,15 @@ use crate::config::DaemonConfig;
 use crate::error::{HeraldError, Result};
 use crate::ipc::protocol::{read_message, write_message, IpcRequest, IpcResponse};
 
+/// Connection metadata passed alongside each IPC request
+#[derive(Debug, Clone)]
+pub struct ConnectionInfo {
+    /// Whether this connection arrived over a Unix domain socket
+    pub is_unix: bool,
+    /// Whether peercred verification succeeded (always false for TCP)
+    pub peercred_verified: bool,
+}
+
 /// IPC server supporting Unix domain socket and/or TCP
 pub struct IpcServer {
     socket_path: Option<PathBuf>,
@@ -86,7 +95,7 @@ impl IpcServer {
     /// Run the accept loop across all bound listeners
     pub async fn run<F, Fut>(&mut self, handler: F) -> Result<()>
     where
-        F: Fn(IpcRequest) -> Fut + Send + Sync + Clone + 'static,
+        F: Fn(IpcRequest, ConnectionInfo) -> Fut + Send + Sync + Clone + 'static,
         Fut: std::future::Future<Output = IpcResponse> + Send,
     {
         let unix = self.unix_listener.take();
@@ -101,12 +110,14 @@ impl IpcServer {
                         result = unix_listener.accept() => {
                             if let Ok((mut stream, _)) = result {
                                 // Verify peer credentials for Unix connections
+                                let conn_info;
                                 #[cfg(unix)]
                                 {
                                     use crate::security::peercred;
                                     match peercred::verify_peer(&stream) {
                                         Ok(creds) => {
                                             info!(pid = creds.pid, uid = creds.uid, "Accepted Unix IPC connection");
+                                            conn_info = ConnectionInfo { is_unix: true, peercred_verified: true };
                                         }
                                         Err(e) => {
                                             warn!("Rejected Unix IPC connection: {}", e);
@@ -114,16 +125,21 @@ impl IpcServer {
                                         }
                                     }
                                 }
+                                #[cfg(not(unix))]
+                                {
+                                    conn_info = ConnectionInfo { is_unix: true, peercred_verified: false };
+                                }
                                 tokio::spawn(async move {
-                                    handle_connection(&mut stream, handler).await;
+                                    handle_connection(&mut stream, handler, conn_info).await;
                                 });
                             }
                         }
                         result = tcp_listener.accept() => {
                             if let Ok((mut stream, addr)) = result {
                                 info!("Accepted TCP IPC connection from {}", addr);
+                                let conn_info = ConnectionInfo { is_unix: false, peercred_verified: false };
                                 tokio::spawn(async move {
-                                    handle_connection(&mut stream, handler).await;
+                                    handle_connection(&mut stream, handler, conn_info).await;
                                 });
                             }
                         }
@@ -134,12 +150,14 @@ impl IpcServer {
                 // Unix only
                 loop {
                     let (mut stream, _) = unix_listener.accept().await?;
+                    let conn_info;
                     #[cfg(unix)]
                     {
                         use crate::security::peercred;
                         match peercred::verify_peer(&stream) {
                             Ok(creds) => {
                                 info!(pid = creds.pid, uid = creds.uid, "Accepted Unix IPC connection");
+                                conn_info = ConnectionInfo { is_unix: true, peercred_verified: true };
                             }
                             Err(e) => {
                                 warn!("Rejected Unix IPC connection: {}", e);
@@ -147,9 +165,13 @@ impl IpcServer {
                             }
                         }
                     }
+                    #[cfg(not(unix))]
+                    {
+                        conn_info = ConnectionInfo { is_unix: true, peercred_verified: false };
+                    }
                     let handler = handler.clone();
                     tokio::spawn(async move {
-                        handle_connection(&mut stream, handler).await;
+                        handle_connection(&mut stream, handler, conn_info).await;
                     });
                 }
             }
@@ -158,9 +180,10 @@ impl IpcServer {
                 loop {
                     let (mut stream, addr) = tcp_listener.accept().await?;
                     info!("Accepted TCP IPC connection from {}", addr);
+                    let conn_info = ConnectionInfo { is_unix: false, peercred_verified: false };
                     let handler = handler.clone();
                     tokio::spawn(async move {
-                        handle_connection(&mut stream, handler).await;
+                        handle_connection(&mut stream, handler, conn_info).await;
                     });
                 }
             }
@@ -176,15 +199,15 @@ impl IpcServer {
 }
 
 /// Handle a single connection (works with any AsyncRead + AsyncWrite)
-async fn handle_connection<S, F, Fut>(stream: &mut S, handler: F)
+async fn handle_connection<S, F, Fut>(stream: &mut S, handler: F, conn_info: ConnectionInfo)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-    F: Fn(IpcRequest) -> Fut,
+    F: Fn(IpcRequest, ConnectionInfo) -> Fut,
     Fut: std::future::Future<Output = IpcResponse>,
 {
     match read_message::<_, IpcRequest>(stream).await {
         Ok(request) => {
-            let response = handler(request).await;
+            let response = handler(request, conn_info).await;
             if let Err(e) = write_message(stream, &response).await {
                 error!("Failed to send IPC response: {}", e);
             }

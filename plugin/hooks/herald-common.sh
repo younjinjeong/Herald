@@ -1,6 +1,24 @@
 #!/bin/bash
 # Herald hooks: shared helper functions
 
+# Load config.env from plugin root (fallback for env vars)
+# CLAUDE_PLUGIN_ROOT is set by Claude Code when running hooks
+_herald_config="${CLAUDE_PLUGIN_ROOT:+${CLAUDE_PLUGIN_ROOT}/config.env}"
+if [ -n "$_herald_config" ] && [ -f "$_herald_config" ]; then
+    # Source only known variables (don't blindly source arbitrary code)
+    _addr=$(grep -E '^HERALD_DAEMON_ADDR=' "$_herald_config" 2>/dev/null | head -1 | cut -d= -f2-)
+    if [ -n "$_addr" ] && [ -z "$HERALD_DAEMON_ADDR" ]; then
+        HERALD_DAEMON_ADDR="$_addr"
+    fi
+    unset _addr
+fi
+unset _herald_config
+
+# Detect transport type (Unix socket = peercred auth, TCP = token auth)
+herald_is_unix_transport() {
+    [ -z "$HERALD_DAEMON_ADDR" ]
+}
+
 # Send IPC message and return the response
 # Usage: RESPONSE=$(herald_ipc_send "$MSG")
 herald_ipc_send() {
@@ -9,6 +27,19 @@ herald_ipc_send() {
         echo "$msg" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null || true
     else
         echo "$msg" | herald ipc-send 2>/dev/null || true
+    fi
+}
+
+# Read token from file (only needed for TCP transport)
+# Sets TOKEN variable
+herald_read_token() {
+    local session_id="$1"
+    TOKEN=""
+    if ! herald_is_unix_transport; then
+        local token_file="/tmp/herald/tokens/$session_id"
+        if [ -f "$token_file" ]; then
+            TOKEN=$(cat "$token_file")
+        fi
     fi
 }
 
@@ -48,11 +79,14 @@ herald_reregister() {
     local new_token
     new_token=$(echo "$response" | jq -r '.token // empty' 2>/dev/null)
     if [ -n "$new_token" ]; then
-        TOKEN_DIR="/tmp/herald/tokens"
-        mkdir -p "$TOKEN_DIR"
-        chmod 700 "$TOKEN_DIR"
-        echo "$new_token" > "$TOKEN_DIR/$session_id"
-        chmod 600 "$TOKEN_DIR/$session_id"
+        # Only persist token for TCP transport
+        if ! herald_is_unix_transport; then
+            TOKEN_DIR="/tmp/herald/tokens"
+            mkdir -p "$TOKEN_DIR"
+            chmod 700 "$TOKEN_DIR"
+            echo "$new_token" > "$TOKEN_DIR/$session_id"
+            chmod 600 "$TOKEN_DIR/$session_id"
+        fi
         TOKEN="$new_token"
         return 0
     fi

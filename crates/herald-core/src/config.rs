@@ -92,6 +92,8 @@ pub struct SessionsConfig {
     pub max_concurrent: usize,
     #[serde(default = "default_auto_cleanup_minutes")]
     pub auto_cleanup_minutes: u64,
+    #[serde(default = "default_debounce_seconds")]
+    pub debounce_seconds: u64,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -187,6 +189,9 @@ fn default_max_concurrent() -> usize {
 fn default_auto_cleanup_minutes() -> u64 {
     30
 }
+fn default_debounce_seconds() -> u64 {
+    15
+}
 
 impl Default for DaemonConfig {
     fn default() -> Self {
@@ -252,6 +257,7 @@ impl Default for SessionsConfig {
         Self {
             max_concurrent: default_max_concurrent(),
             auto_cleanup_minutes: default_auto_cleanup_minutes(),
+            debounce_seconds: default_debounce_seconds(),
         }
     }
 }

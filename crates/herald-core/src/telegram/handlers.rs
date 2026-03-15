@@ -7,6 +7,7 @@ use crate::ipc::client::IpcClient;
 use crate::ipc::protocol::IpcRequest;
 use crate::telegram::bot::{enqueue_message, BotState};
 use crate::telegram::callbacks::parse_callback_data;
+use crate::telegram::formatting::escape_markdown_v2;
 use crate::types::SESSION_COLORS;
 
 /// Handle plain text messages (OTP verification or prompt forwarding)
@@ -105,8 +106,8 @@ pub async fn text_handler(bot: Bot, msg: Message, state: BotState) -> ResponseRe
                 enqueue_message(
                     &queue_tx,
                     chat_id,
-                    format!("{} \u{1f4e8} Delivered", tag_clone),
-                    None,
+                    format!("{} \u{1f4e8} _Delivered_", escape_markdown_v2(&tag_clone)),
+                    Some("MarkdownV2".to_string()),
                 )
                 .await;
             }
@@ -179,7 +180,7 @@ async fn extract_session_from_tag(text: &str, state: &BotState) -> Option<String
     None
 }
 
-/// Handle inline keyboard callback queries (session selection, etc.)
+/// Handle inline keyboard callback queries (session selection, approval, etc.)
 pub async fn callback_handler(
     bot: Bot,
     query: CallbackQuery,
@@ -216,6 +217,36 @@ pub async fn callback_handler(
                 } else {
                     bot.answer_callback_query(&query.id)
                         .text("Session not found")
+                        .await?;
+                }
+            }
+            "approve" | "deny" => {
+                let request_id = payload;
+                let mut perms = state.pending_permissions.lock().await;
+                if let Some(perm) = perms.get_mut(request_id) {
+                    let decision = action.to_string();
+                    perm.decision = Some(decision.clone());
+                    drop(perms);
+
+                    let label = if action == "approve" {
+                        "\u{2705} Approved"
+                    } else {
+                        "\u{274c} Denied"
+                    };
+                    bot.answer_callback_query(&query.id)
+                        .text(label)
+                        .await?;
+
+                    // Edit the original message to remove buttons and show decision
+                    if let Some(teloxide::types::MaybeInaccessibleMessage::Regular(msg)) = query.message {
+                        let original_text = msg.text().unwrap_or("");
+                        let _ = bot
+                            .edit_message_text(msg.chat.id, msg.id, format!("{} \\({}\\)", original_text, label))
+                            .await;
+                    }
+                } else {
+                    bot.answer_callback_query(&query.id)
+                        .text("Request expired or not found")
                         .await?;
                 }
             }

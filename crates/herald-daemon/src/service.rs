@@ -5,15 +5,20 @@ use std::sync::Arc;
 
 use herald_core::config::HeraldConfig;
 use herald_core::ipc::protocol::{IpcRequest, IpcResponse};
-use herald_core::ipc::server::IpcServer;
+use herald_core::ipc::server::{ConnectionInfo, IpcServer};
 use herald_core::logging::ConversationLogger;
 use herald_core::security::content_filter::filter_content;
 use herald_core::session::registry::SessionRegistry;
 use herald_core::session::token::generate_token;
 use herald_core::telegram::bot::{
-    create_bot, drain_queue, enqueue_message, run_bot, BotState, OutboundMessage,
+    create_bot, drain_queue, enqueue_message, enqueue_message_with_keyboard, run_bot, BotState,
+    OutboundMessage, PendingPermission, PendingPermissions,
 };
-use herald_core::telegram::formatting::escape_markdown_v2;
+use herald_core::telegram::callbacks::build_permission_keyboard;
+use herald_core::telegram::formatting::{
+    escape_markdown_v2, format_ask_user_question, format_completion, format_permission_request,
+    format_session_end, format_session_start, format_working, split_message,
+};
 use herald_core::types::{ConversationEntry, SessionId, SessionInfo, SessionState, TokenUsage};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -30,9 +35,6 @@ struct ActivityState {
 
 type ActivityTracker = Arc<Mutex<HashMap<String, ActivityState>>>;
 
-const DEBOUNCE_SECS: u64 = 15;
-const MAX_TELEGRAM_LEN: usize = 3900;
-
 pub async fn run(config: HeraldConfig) -> Result<()> {
     let start_time = chrono::Utc::now();
     let config_path = HeraldConfig::default_path();
@@ -40,9 +42,15 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     let telegram_connected = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
+    // Clean up stale token files on startup
+    cleanup_token_files();
+
     // Create conversation logger with configured output mode
     let log_output = herald_core::logging::LogOutput::from_str(&config.daemon.log_output);
     let logger = Arc::new(ConversationLogger::new(None, log_output));
+
+    // Read debounce from config
+    let debounce_secs = config.sessions.debounce_seconds;
 
     // Create message queue
     let (queue_tx, queue_rx) = mpsc::channel::<OutboundMessage>(256);
@@ -53,6 +61,8 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
 
     let config_arc = Arc::new(RwLock::new(config));
 
+    let pending_permissions: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
+
     let bot_state = BotState {
         config: config_arc.clone(),
         config_path: config_path.clone(),
@@ -62,6 +72,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         start_time,
         pending_otp: Arc::new(Mutex::new(None)),
         active_session: Arc::new(Mutex::new(None)),
+        pending_permissions: pending_permissions.clone(),
     };
 
     // Task 1: IPC server
@@ -80,6 +91,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
 
     let logger_for_ipc = logger.clone();
     let activity_for_ipc = activity.clone();
+    let permissions_for_ipc = pending_permissions.clone();
     let ipc_handle = tokio::spawn(async move {
         let registry = registry_for_ipc;
         let config = config_for_ipc;
@@ -89,9 +101,10 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         let shutdown = shutdown_tx_clone;
         let logger = logger_for_ipc;
         let activity = activity_for_ipc;
+        let permissions = permissions_for_ipc;
 
         if let Err(e) = ipc_server
-            .run(move |request| {
+            .run(move |request, conn_info| {
                 let registry = registry.clone();
                 let config = config.clone();
                 let queue_tx = queue_tx.clone();
@@ -99,8 +112,9 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
                 let shutdown = shutdown.clone();
                 let logger = logger.clone();
                 let activity = activity.clone();
+                let permissions = permissions.clone();
                 async move {
-                    handle_request(request, &registry, &config, &queue_tx, &tc, start, &shutdown, &logger, &activity)
+                    handle_request(request, conn_info, &registry, &config, &queue_tx, &tc, start, &shutdown, &logger, &activity, debounce_secs, &permissions)
                         .await
                 }
             })
@@ -129,6 +143,27 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         let _ = shutdown_tx.send(true);
     });
 
+    // Task 5: Garbage session reaper (check every 60s for dead processes)
+    let registry_for_reaper = registry.clone();
+    let config_for_reaper = config_arc.clone();
+    let queue_tx_for_reaper = queue_tx.clone();
+    let activity_for_reaper = activity.clone();
+    let permissions_for_reaper = pending_permissions.clone();
+    let reaper_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            reap_dead_sessions(
+                &registry_for_reaper,
+                &config_for_reaper,
+                &queue_tx_for_reaper,
+                &activity_for_reaper,
+            )
+            .await;
+            // Reap stale permission requests (>60s old)
+            reap_stale_permissions(&permissions_for_reaper).await;
+        }
+    });
+
     // Wait for shutdown signal
     shutdown_rx.changed().await?;
     info!("Shutting down Herald daemon...");
@@ -149,12 +184,105 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     telegram_handle.abort();
     queue_handle.abort();
     signal_handle.abort();
+    reaper_handle.abort();
 
     Ok(())
 }
 
+/// Clean up stale token files on daemon startup
+fn cleanup_token_files() {
+    let token_dir = std::path::Path::new("/tmp/herald/tokens");
+    if token_dir.exists() {
+        if let Ok(entries) = std::fs::read_dir(token_dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        info!("Cleaned up stale token files");
+    }
+}
+
+/// Reap sessions whose processes have died (garbage collection)
+async fn reap_dead_sessions(
+    registry: &SessionRegistry,
+    config: &Arc<RwLock<HeraldConfig>>,
+    queue_tx: &mpsc::Sender<OutboundMessage>,
+    activity: &ActivityTracker,
+) {
+    let sessions = registry.list().await;
+    for session in &sessions {
+        let should_reap = !crate::pty::is_process_alive(session.pid)
+            || session.state == "Stopped";
+        if should_reap {
+            let tag = registry.get_tag(&session.id).await;
+            let reason = if session.state == "Stopped" {
+                "stopped session cleanup"
+            } else {
+                "process exited"
+            };
+            info!("Reaping session {} ({})", session.id, reason);
+
+            // Clean up activity state
+            {
+                let mut act = activity.lock().await;
+                if let Some(state) = act.remove(&session.id) {
+                    if let Some(handle) = state.completion_handle {
+                        handle.abort();
+                    }
+                }
+            }
+
+            // Unregister
+            let _ = registry.unregister(&session.id).await;
+
+            // Clean up token file
+            let token_file = format!("/tmp/herald/tokens/{}", session.id);
+            let _ = std::fs::remove_file(&token_file);
+
+            // Notify Telegram (only for unexpected deaths, not for Stopped sessions
+            // which already sent their completion message)
+            if session.state != "Stopped" {
+                let config = config.read().await;
+                let text = format!("{} Session lost \\(process exited\\)", escape_markdown_v2(&tag));
+                for &chat_id in &config.auth.allowed_chat_ids {
+                    enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
+                }
+            }
+        }
+    }
+}
+
+/// Check if token auth should be skipped (Unix socket with peercred verification)
+fn skip_token_auth(conn_info: &ConnectionInfo) -> bool {
+    conn_info.is_unix && conn_info.peercred_verified
+}
+
+/// Validate token for a request, skipping validation for peercred-verified Unix connections
+async fn validate_token(
+    registry: &SessionRegistry,
+    session_id: &str,
+    token: &Option<String>,
+    conn_info: &ConnectionInfo,
+    context: &str,
+) -> std::result::Result<(), IpcResponse> {
+    if skip_token_auth(conn_info) {
+        return Ok(());
+    }
+    match token {
+        Some(t) if registry.validate_token(session_id, t).await => Ok(()),
+        _ => {
+            warn!("{}: invalid token for session {}", context, session_id);
+            Err(IpcResponse::Error {
+                code: 401,
+                message: "Invalid session token".to_string(),
+            })
+        }
+    }
+}
+
 async fn handle_request(
     request: IpcRequest,
+    conn_info: ConnectionInfo,
     registry: &SessionRegistry,
     config: &Arc<RwLock<HeraldConfig>>,
     queue_tx: &mpsc::Sender<OutboundMessage>,
@@ -163,6 +291,8 @@ async fn handle_request(
     shutdown_tx: &watch::Sender<bool>,
     logger: &ConversationLogger,
     activity: &ActivityTracker,
+    debounce_secs: u64,
+    pending_permissions: &PendingPermissions,
 ) -> IpcResponse {
     match request {
         IpcRequest::Register {
@@ -195,14 +325,9 @@ async fn handle_request(
                     info!("Session registered: {} (PID {}, tmux={})", session_id, pid, has_tmux);
                     logger.log_session_event(&session_id, &format!("started ({})", cwd));
                     let config = config.read().await;
-                    let tmux_status = if has_tmux {
-                        ""
-                    } else {
-                        "\n\u{26a0}\u{fe0f} Not in tmux \u{2014} Telegram input disabled"
-                    };
-                    let text = format!("{} Session started\nDir: {}{}", tag, cwd, tmux_status);
+                    let text = format_session_start(&tag, &cwd);
                     for &chat_id in &config.auth.allowed_chat_ids {
-                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                        enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
                     }
                     IpcResponse::Registered { token: token.0 }
                 }
@@ -213,12 +338,17 @@ async fn handle_request(
             }
         }
         IpcRequest::Unregister { session_id, token } => {
-            if !registry.validate_token(&session_id, &token).await {
-                warn!("Unregister: invalid token for session {}", session_id);
-                return IpcResponse::Error {
-                    code: 401,
-                    message: "Invalid session token".to_string(),
-                };
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "Unregister").await {
+                return resp;
+            }
+            // Clean up activity state (debounce timer, working state)
+            {
+                let mut act = activity.lock().await;
+                if let Some(state) = act.remove(&session_id) {
+                    if let Some(handle) = state.completion_handle {
+                        handle.abort();
+                    }
+                }
             }
             let tag = registry.get_tag(&session_id).await;
             match registry.unregister(&session_id).await {
@@ -226,9 +356,9 @@ async fn handle_request(
                     info!("Session unregistered: {}", session_id);
                     logger.log_session_event(&session_id, "ended");
                     let config = config.read().await;
-                    let text = format!("{} Session ended", tag);
+                    let text = format_session_end(&tag);
                     for &chat_id in &config.auth.allowed_chat_ids {
-                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                        enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
                     }
                     IpcResponse::Ok {
                         message: Some("Session unregistered".to_string()),
@@ -247,12 +377,8 @@ async fn handle_request(
             tool_input_summary: _,
             tool_response_summary: _,
         } => {
-            if !registry.validate_token(&session_id, &token).await {
-                warn!("Output: invalid token for session {} (tool: {})", session_id, tool_name);
-                return IpcResponse::Error {
-                    code: 401,
-                    message: "Invalid session token".to_string(),
-                };
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "Output").await {
+                return resp;
             }
             registry.update_activity(&session_id).await;
 
@@ -280,7 +406,7 @@ async fn handle_request(
             let queue_tx_clone = queue_tx.clone();
             let activity_clone = activity.clone();
             state.completion_handle = Some(tokio::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(DEBOUNCE_SECS)).await;
+                tokio::time::sleep(std::time::Duration::from_secs(debounce_secs)).await;
                 fire_completion(
                     &session_id_clone,
                     &registry_clone,
@@ -299,22 +425,23 @@ async fn handle_request(
             notification_type,
             message,
         } => {
-            if !registry.validate_token(&session_id, &token).await {
-                warn!("Notification: invalid token for session {}", session_id);
-                return IpcResponse::Error {
-                    code: 401,
-                    message: "Invalid session token".to_string(),
-                };
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "Notification").await {
+                return resp;
             }
 
             let tag = registry.get_tag(&session_id).await;
             let config = config.read().await;
-            let text = format!(
-                "{} Notification [{}]:\n{}",
-                tag,
-                escape_markdown_v2(&notification_type),
-                escape_markdown_v2(&message)
-            );
+
+            let text = if notification_type == "ask_user_question" {
+                format_ask_user_question(&tag, &message)
+            } else {
+                format!(
+                    "{} Notification \\[{}\\]:\n{}",
+                    escape_markdown_v2(&tag),
+                    escape_markdown_v2(&notification_type),
+                    escape_markdown_v2(&message)
+                )
+            };
             for &chat_id in &config.auth.allowed_chat_ids {
                 enqueue_message(
                     queue_tx,
@@ -331,12 +458,8 @@ async fn handle_request(
             token,
             last_message,
         } => {
-            if !registry.validate_token(&session_id, &token).await {
-                warn!("SessionStopped: invalid token for session {}", session_id);
-                return IpcResponse::Error {
-                    code: 401,
-                    message: "Invalid session token".to_string(),
-                };
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "SessionStopped").await {
+                return resp;
             }
 
             // Extract activity state and cancel debounce timer
@@ -352,22 +475,11 @@ async fn handle_request(
 
             let tag = registry.get_tag(&session_id).await;
 
-            // Get token usage before unregistering
-            let token_line = if let Some(usage) = registry.get_token_usage(&session_id).await {
-                format!(
-                    "Tokens: {} in / {} out \u{00b7} ${:.4}",
-                    format_num(usage.input_tokens),
-                    format_num(usage.output_tokens),
-                    usage.total_cost_usd,
-                )
-            } else {
-                String::new()
-            };
-
-            let _ = registry.unregister(&session_id).await;
+            // Get token usage; mark session as Stopped (let Unregister do actual removal)
+            let usage = registry.get_token_usage(&session_id).await;
+            registry.update_state(&session_id, SessionState::Stopped).await;
 
             // Build rich completion message
-            let separator = "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}";
             let (tool_count, stored_response) = activity_info.unwrap_or((0, None));
 
             // Use stored assistant_response, fall back to last_message from hook
@@ -375,23 +487,14 @@ async fn handle_request(
                 .filter(|s| !s.is_empty())
                 .unwrap_or(last_message);
 
-            let mut text = if tool_count > 0 {
-                format!("{} \u{2705} Done ({} tools used)\n{}", tag, tool_count, separator)
-            } else {
-                format!("{} \u{1f6d1} Session ended\n{}", tag, separator)
-            };
-            if !token_line.is_empty() {
-                text.push_str(&format!("\n{}\n{}", token_line, separator));
-            }
-            if !response_content.is_empty() {
-                let truncated = safe_truncate(&response_content, MAX_TELEGRAM_LEN);
-                text.push('\n');
-                text.push_str(&truncated);
-            }
+            let text = format_completion(&tag, tool_count, usage.as_ref(), &response_content);
 
             let config = config.read().await;
             for &chat_id in &config.auth.allowed_chat_ids {
-                enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                let parts = split_message(&text, 4096);
+                for part in parts {
+                    enqueue_message(queue_tx, chat_id, part, Some("MarkdownV2".to_string())).await;
+                }
             }
             IpcResponse::Ok { message: None }
         }
@@ -399,40 +502,16 @@ async fn handle_request(
             session_id,
             prompt,
         } => {
-            // Try tmux injection if session has a tmux pane and live PID
-            if let Some(session) = registry.get(&session_id).await {
-                if let Some(ref pane) = session.tmux_pane {
-                    if crate::pty::is_process_alive(session.pid) {
-                        match crate::pty::inject_via_tmux(pane, &prompt).await {
-                            Ok(()) => {
-                                let tag = registry.get_tag(&session_id).await;
-                                let config = config.read().await;
-                                for &chat_id in &config.auth.allowed_chat_ids {
-                                    enqueue_message(
-                                        queue_tx, chat_id,
-                                        format!("{} Input injected via tmux", tag),
-                                        None,
-                                    ).await;
-                                }
-                                return IpcResponse::Ok {
-                                    message: Some("Input injected via tmux".to_string()),
-                                };
-                            }
-                            Err(e) => {
-                                tracing::warn!("tmux injection failed, falling back to headless: {}", e);
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Fallback: headless mode (no tmux pane or injection failed)
+            // Headless mode: use `claude --continue <session_id> -p <prompt>`
             let config = config.read().await;
-            match crate::headless::execute_prompt(&prompt).await {
+            match crate::headless::execute_prompt(&prompt, Some(&session_id)).await {
                 Ok(output) => {
                     let filtered = filter_content(&output, &config.output_filter);
                     for &chat_id in &config.auth.allowed_chat_ids {
-                        enqueue_message(queue_tx, chat_id, filtered.clone(), None).await;
+                        let parts = split_message(&filtered, 4096);
+                        for part in parts {
+                            enqueue_message(queue_tx, chat_id, part, None).await;
+                        }
                     }
                     IpcResponse::Ok {
                         message: Some("Prompt executed".to_string()),
@@ -453,12 +532,8 @@ async fn handle_request(
             cache_creation_tokens,
             total_cost_usd,
         } => {
-            if !registry.validate_token(&session_id, &token).await {
-                warn!("TokenUpdate: invalid token for session {}", session_id);
-                return IpcResponse::Error {
-                    code: 401,
-                    message: "Invalid session token".to_string(),
-                };
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "TokenUpdate").await {
+                return resp;
             }
 
             let usage = TokenUsage {
@@ -483,20 +558,18 @@ async fn handle_request(
                 let text = format!(
                     "{} \u{1f4ca} Tokens\n\
                      \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
-                     Tokens: {} in / {} out\n\
-                     Cache:  {} read / {} created\n\
-                     Cost:   ${:.4}\n\
-                     Updated: {}",
-                    tag,
+                     `{} in / {} out`\n\
+                     `Cache: {} read / {} created`\n\
+                     `Cost: ${:.4}`",
+                    escape_markdown_v2(&tag),
                     format_num(input_tokens),
                     format_num(output_tokens),
                     format_num(cache_read_tokens),
                     format_num(cache_creation_tokens),
                     total_cost_usd,
-                    chrono::Utc::now().format("%H:%M:%S"),
                 );
                 for &chat_id in &config.auth.allowed_chat_ids {
-                    enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                    enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
                 }
             }
 
@@ -509,12 +582,8 @@ async fn handle_request(
             content,
             timestamp,
         } => {
-            if !registry.validate_token(&session_id, &token).await {
-                warn!("ConversationEntry({}): invalid token for session {}", entry_type, session_id);
-                return IpcResponse::Error {
-                    code: 401,
-                    message: "Invalid session token".to_string(),
-                };
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, &format!("ConversationEntry({})", entry_type)).await {
+                return resp;
             }
 
             let ts = chrono::DateTime::parse_from_rfc3339(&timestamp)
@@ -555,20 +624,42 @@ async fn handle_request(
                     }
 
                     let config = config.read().await;
-                    let text = format!("{} \u{1f528} Working on: \"{}\"", tag, {
+                    let preview = {
                         let act = activity.lock().await;
                         act.get(&session_id).map(|s| s.prompt_preview.clone()).unwrap_or_default()
-                    });
+                    };
+                    let text = format_working(&tag, &preview);
                     for &chat_id in &config.auth.allowed_chat_ids {
-                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                        enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
                     }
                 }
                 "assistant_response" => {
                     logger.log_assistant_response(&session_id, &content);
                     // Store for use by fire_completion/SessionStopped as fallback
+                    // Also reset debounce timer — assistant is still active
                     let mut act = activity.lock().await;
                     if let Some(state) = act.get_mut(&session_id) {
                         state.last_assistant_response = Some(content.clone());
+                        // Reset debounce: abort existing timer and start a new one
+                        if let Some(handle) = state.completion_handle.take() {
+                            handle.abort();
+                        }
+                        let session_id_clone = session_id.clone();
+                        let registry_clone = registry.clone();
+                        let config_clone = config.clone();
+                        let queue_tx_clone = queue_tx.clone();
+                        let activity_clone = activity.clone();
+                        state.completion_handle = Some(tokio::spawn(async move {
+                            tokio::time::sleep(std::time::Duration::from_secs(debounce_secs)).await;
+                            fire_completion(
+                                &session_id_clone,
+                                &registry_clone,
+                                &config_clone,
+                                &queue_tx_clone,
+                                &activity_clone,
+                            )
+                            .await;
+                        }));
                     }
                 }
                 "tool_summary" => {
@@ -579,6 +670,64 @@ async fn handle_request(
             }
 
             IpcResponse::Ok { message: None }
+        }
+        IpcRequest::PermissionRequest {
+            session_id,
+            token,
+            request_id,
+            tool_name,
+            tool_input,
+        } => {
+            if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "PermissionRequest").await {
+                return resp;
+            }
+
+            let tag = registry.get_tag(&session_id).await;
+
+            // Store pending permission
+            {
+                let mut perms = pending_permissions.lock().await;
+                perms.insert(
+                    request_id.clone(),
+                    PendingPermission {
+                        session_id: session_id.clone(),
+                        tool_name: tool_name.clone(),
+                        tool_input: tool_input.clone(),
+                        decision: None,
+                        created_at: chrono::Utc::now(),
+                    },
+                );
+            }
+
+            // Send Telegram message with approve/deny buttons
+            let text = format_permission_request(&tag, &tool_name, &tool_input);
+            let keyboard = build_permission_keyboard(&request_id);
+            let config = config.read().await;
+            for &chat_id in &config.auth.allowed_chat_ids {
+                enqueue_message_with_keyboard(
+                    queue_tx,
+                    chat_id,
+                    text.clone(),
+                    Some("MarkdownV2".to_string()),
+                    keyboard.clone(),
+                )
+                .await;
+            }
+
+            info!("Permission request {} for tool {} (session {})", request_id, tool_name, session_id);
+            IpcResponse::Ok { message: None }
+        }
+        IpcRequest::PermissionCheck { request_id } => {
+            let perms = pending_permissions.lock().await;
+            if let Some(perm) = perms.get(&request_id) {
+                let decision = perm.decision.clone().unwrap_or_else(|| "pending".to_string());
+                IpcResponse::PermissionResult { decision }
+            } else {
+                // Not found — may have been reaped; auto-allow
+                IpcResponse::PermissionResult {
+                    decision: "allow".to_string(),
+                }
+            }
         }
         IpcRequest::Health => {
             let uptime = (chrono::Utc::now() - start_time).num_seconds() as u64;
@@ -628,54 +777,30 @@ async fn fire_completion(
     let tag = registry.get_tag(session_id).await;
 
     // Get token usage for summary
-    let token_line = if let Some(usage) = registry.get_token_usage(session_id).await {
-        format!(
-            "Tokens: {} in / {} out \u{00b7} ${:.4}",
-            format_num(usage.input_tokens),
-            format_num(usage.output_tokens),
-            usage.total_cost_usd,
-        )
-    } else {
-        String::new()
-    };
+    let usage = registry.get_token_usage(session_id).await;
 
-    // Try tmux capture first, fall back to stored assistant_response
-    let response_content = if let Some(session) = registry.get(session_id).await {
-        if let Some(ref pane) = session.tmux_pane {
-            match crate::pty::capture_tmux_pane(pane).await {
-                Ok(content) if !content.is_empty() => {
-                    safe_truncate_tail(&content, MAX_TELEGRAM_LEN)
-                }
-                Ok(_) | Err(_) => {
-                    // tmux capture empty or failed — use stored response
-                    stored_response.unwrap_or_default()
-                }
-            }
-        } else {
-            // No tmux pane — use stored response
-            stored_response.unwrap_or_default()
-        }
-    } else {
-        stored_response.unwrap_or_default()
-    };
+    // Use stored assistant_response from activity state
+    let response_content = stored_response.unwrap_or_default();
 
-    let separator = "\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}";
-    let mut text = format!(
-        "{} \u{2705} Done ({} tools used)\n{}",
-        tag, tool_count, separator,
-    );
-    if !token_line.is_empty() {
-        text.push_str(&format!("\n{}\n{}", token_line, separator));
-    }
-    if !response_content.is_empty() {
-        text.push('\n');
-        text.push_str(&safe_truncate(&response_content, MAX_TELEGRAM_LEN));
-    }
+    let text = format_completion(&tag, tool_count, usage.as_ref(), &response_content);
 
     let config = config.read().await;
     for &chat_id in &config.auth.allowed_chat_ids {
-        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+        let parts = split_message(&text, 4096);
+        for part in parts {
+            enqueue_message(queue_tx, chat_id, part, Some("MarkdownV2".to_string())).await;
+        }
     }
+}
+
+/// Reap stale permission requests older than 60 seconds
+async fn reap_stale_permissions(permissions: &PendingPermissions) {
+    let now = chrono::Utc::now();
+    let mut perms = permissions.lock().await;
+    perms.retain(|_id, perm| {
+        let age = (now - perm.created_at).num_seconds();
+        age < 60
+    });
 }
 
 /// Truncate a string to at most `max_len` characters, finding a valid UTF-8 char boundary.
@@ -688,18 +813,6 @@ fn safe_truncate(s: &str, max_len: usize) -> String {
         end -= 1;
     }
     format!("{}...", &s[..end])
-}
-
-/// Take the last `max_len` characters of a string (for tmux captures where recent output is at bottom).
-fn safe_truncate_tail(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
-        return s.to_string();
-    }
-    let mut start = s.len() - max_len;
-    while start < s.len() && !s.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("...{}", &s[start..])
 }
 
 fn format_num(n: u64) -> String {

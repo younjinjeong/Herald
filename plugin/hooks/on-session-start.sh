@@ -2,6 +2,8 @@
 # Herald hook: SessionStart
 # Registers a new Claude Code session with the Herald daemon
 
+source "$(dirname "$0")/herald-common.sh"
+
 INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
@@ -33,20 +35,18 @@ else
 fi
 
 # Send to daemon and capture response to extract token
-if [ -n "$HERALD_DAEMON_ADDR" ]; then
-    RESPONSE=$(echo "$MSG" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null) || true
-else
-    RESPONSE=$(echo "$MSG" | herald ipc-send 2>/dev/null) || true
-fi
+RESPONSE=$(herald_ipc_send "$MSG")
 
-# Extract and persist the session token for use by subsequent hooks
-HERALD_TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty' 2>/dev/null)
-if [ -n "$HERALD_TOKEN" ]; then
-    TOKEN_DIR="/tmp/herald/tokens"
-    mkdir -p "$TOKEN_DIR"
-    chmod 700 "$TOKEN_DIR"
-    echo "$HERALD_TOKEN" > "$TOKEN_DIR/$SESSION_ID"
-    chmod 600 "$TOKEN_DIR/$SESSION_ID"
+# Extract and persist the session token (only for TCP transport)
+if ! herald_is_unix_transport; then
+    HERALD_TOKEN=$(echo "$RESPONSE" | jq -r '.token // empty' 2>/dev/null)
+    if [ -n "$HERALD_TOKEN" ]; then
+        TOKEN_DIR="/tmp/herald/tokens"
+        mkdir -p "$TOKEN_DIR"
+        chmod 700 "$TOKEN_DIR"
+        echo "$HERALD_TOKEN" > "$TOKEN_DIR/$SESSION_ID"
+        chmod 600 "$TOKEN_DIR/$SESSION_ID"
+    fi
 fi
 
 # Output context for Claude

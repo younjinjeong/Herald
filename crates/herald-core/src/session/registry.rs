@@ -77,6 +77,15 @@ impl SessionRegistry {
         }
     }
 
+    /// Update session state (e.g., mark as Stopped)
+    pub async fn update_state(&self, id: &str, state: crate::types::SessionState) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(id) {
+            session.state = state;
+            session.last_activity = Utc::now();
+        }
+    }
+
     pub async fn count(&self) -> usize {
         let sessions = self.sessions.read().await;
         sessions.len()

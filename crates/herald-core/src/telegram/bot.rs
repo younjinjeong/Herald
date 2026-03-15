@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -5,12 +6,24 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use teloxide::dispatching::UpdateFilterExt;
 use teloxide::prelude::*;
+use teloxide::types::InlineKeyboardMarkup;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tracing::{error, info};
 
 use crate::auth::otp::OtpRecord;
 use crate::config::HeraldConfig;
 use crate::session::registry::SessionRegistry;
+
+/// A pending permission request awaiting Telegram user decision
+pub struct PendingPermission {
+    pub session_id: String,
+    pub tool_name: String,
+    pub tool_input: String,
+    pub decision: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+pub type PendingPermissions = Arc<Mutex<HashMap<String, PendingPermission>>>;
 
 use super::commands::{command_handler, HeraldCommand};
 use super::handlers::{callback_handler, text_handler};
@@ -20,6 +33,7 @@ pub struct OutboundMessage {
     pub chat_id: i64,
     pub text: String,
     pub parse_mode: Option<String>,
+    pub reply_markup: Option<InlineKeyboardMarkup>,
 }
 
 /// Shared state injected into all teloxide handlers
@@ -33,6 +47,7 @@ pub struct BotState {
     pub start_time: DateTime<Utc>,
     pub pending_otp: Arc<Mutex<Option<OtpRecord>>>,
     pub active_session: Arc<Mutex<Option<String>>>,
+    pub pending_permissions: PendingPermissions,
 }
 
 pub fn create_bot(token: &str) -> Bot {
@@ -76,9 +91,29 @@ pub async fn enqueue_message(
         chat_id,
         text,
         parse_mode,
+        reply_markup: None,
     };
     if let Err(e) = queue_tx.send(msg).await {
         error!("Failed to enqueue message: {}", e);
+    }
+}
+
+/// Send a message with an inline keyboard through the outbound queue
+pub async fn enqueue_message_with_keyboard(
+    queue_tx: &mpsc::Sender<OutboundMessage>,
+    chat_id: i64,
+    text: String,
+    parse_mode: Option<String>,
+    keyboard: InlineKeyboardMarkup,
+) {
+    let msg = OutboundMessage {
+        chat_id,
+        text,
+        parse_mode,
+        reply_markup: Some(keyboard),
+    };
+    if let Err(e) = queue_tx.send(msg).await {
+        error!("Failed to enqueue message with keyboard: {}", e);
     }
 }
 
@@ -98,6 +133,10 @@ pub async fn drain_queue(mut rx: mpsc::Receiver<OutboundMessage>, bot: Bot) {
             }
         }
 
+        if let Some(ref keyboard) = msg.reply_markup {
+            request = request.reply_markup(keyboard.clone());
+        }
+
         match request.await {
             Ok(_) => {}
             Err(teloxide::RequestError::RetryAfter(secs)) => {
@@ -110,6 +149,9 @@ pub async fn drain_queue(mut rx: mpsc::Receiver<OutboundMessage>, bot: Bot) {
                     if mode == "MarkdownV2" {
                         retry = retry.parse_mode(ParseMode::MarkdownV2);
                     }
+                }
+                if let Some(ref keyboard) = msg.reply_markup {
+                    retry = retry.reply_markup(keyboard.clone());
                 }
                 if let Err(e) = retry.await {
                     error!("Retry failed: {}", e);

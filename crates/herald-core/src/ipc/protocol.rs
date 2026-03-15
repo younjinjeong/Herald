@@ -16,24 +16,28 @@ pub enum IpcRequest {
     },
     Unregister {
         session_id: String,
-        token: String,
+        #[serde(default)]
+        token: Option<String>,
     },
     Output {
         session_id: String,
-        token: String,
+        #[serde(default)]
+        token: Option<String>,
         tool_name: String,
         tool_input_summary: String,
         tool_response_summary: String,
     },
     Notification {
         session_id: String,
-        token: String,
+        #[serde(default)]
+        token: Option<String>,
         notification_type: String,
         message: String,
     },
     SessionStopped {
         session_id: String,
-        token: String,
+        #[serde(default)]
+        token: Option<String>,
         last_message: String,
     },
     Input {
@@ -42,7 +46,8 @@ pub enum IpcRequest {
     },
     TokenUpdate {
         session_id: String,
-        token: String,
+        #[serde(default)]
+        token: Option<String>,
         input_tokens: u64,
         output_tokens: u64,
         cache_read_tokens: u64,
@@ -51,10 +56,22 @@ pub enum IpcRequest {
     },
     ConversationEntry {
         session_id: String,
-        token: String,
+        #[serde(default)]
+        token: Option<String>,
         entry_type: String,
         content: String,
         timestamp: String,
+    },
+    PermissionRequest {
+        session_id: String,
+        #[serde(default)]
+        token: Option<String>,
+        request_id: String,
+        tool_name: String,
+        tool_input: String,
+    },
+    PermissionCheck {
+        request_id: String,
     },
     Health,
     ListSessions,
@@ -81,6 +98,9 @@ pub enum IpcResponse {
         uptime_secs: u64,
         session_count: usize,
         telegram_connected: bool,
+    },
+    PermissionResult {
+        decision: String,
     },
 }
 
