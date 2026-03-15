@@ -12,12 +12,14 @@ use herald_core::session::registry::SessionRegistry;
 use herald_core::session::token::generate_token;
 use herald_core::telegram::bot::{
     create_bot, drain_queue, enqueue_message, enqueue_message_with_keyboard, run_bot, BotState,
-    OutboundMessage, PendingPermission, PendingPermissions,
+    OutboundMessage, PendingPermission, PendingPermissions, PendingQuestion, PendingQuestions,
+    QuestionOption,
 };
-use herald_core::telegram::callbacks::build_permission_keyboard;
+use herald_core::telegram::callbacks::{build_permission_keyboard, build_question_keyboard};
 use herald_core::telegram::formatting::{
-    escape_markdown_v2, format_ask_user_question, format_completion, format_permission_request,
-    format_session_end, format_session_start, format_working, split_message,
+    escape_markdown_v2, format_ask_user_question, format_ask_user_question_with_options,
+    format_completion, format_permission_request, format_session_end, format_session_start,
+    format_working, split_message,
 };
 use herald_core::types::{ConversationEntry, SessionId, SessionInfo, SessionModes, SessionState, TokenUsage};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
@@ -62,6 +64,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
 
     let pending_permissions: PendingPermissions = Arc::new(Mutex::new(HashMap::new()));
+    let pending_questions: PendingQuestions = Arc::new(Mutex::new(HashMap::new()));
 
     let bot_state = BotState {
         config: config_arc.clone(),
@@ -73,6 +76,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         pending_otp: Arc::new(Mutex::new(None)),
         active_session: Arc::new(Mutex::new(None)),
         pending_permissions: pending_permissions.clone(),
+        pending_questions: pending_questions.clone(),
     };
 
     // Task 1: IPC server
@@ -92,6 +96,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     let logger_for_ipc = logger.clone();
     let activity_for_ipc = activity.clone();
     let permissions_for_ipc = pending_permissions.clone();
+    let questions_for_ipc = pending_questions.clone();
     let ipc_handle = tokio::spawn(async move {
         let registry = registry_for_ipc;
         let config = config_for_ipc;
@@ -102,6 +107,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         let logger = logger_for_ipc;
         let activity = activity_for_ipc;
         let permissions = permissions_for_ipc;
+        let questions = questions_for_ipc;
 
         if let Err(e) = ipc_server
             .run(move |request, conn_info| {
@@ -113,8 +119,9 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
                 let logger = logger.clone();
                 let activity = activity.clone();
                 let permissions = permissions.clone();
+                let questions = questions.clone();
                 async move {
-                    handle_request(request, conn_info, &registry, &config, &queue_tx, &tc, start, &shutdown, &logger, &activity, debounce_secs, &permissions)
+                    handle_request(request, conn_info, &registry, &config, &queue_tx, &tc, start, &shutdown, &logger, &activity, debounce_secs, &permissions, &questions)
                         .await
                 }
             })
@@ -301,6 +308,7 @@ async fn handle_request(
     activity: &ActivityTracker,
     debounce_secs: u64,
     pending_permissions: &PendingPermissions,
+    pending_questions: &PendingQuestions,
 ) -> IpcResponse {
     match request {
         IpcRequest::Register {
@@ -441,6 +449,7 @@ async fn handle_request(
             token,
             notification_type,
             message,
+            extras,
         } => {
             if let Err(resp) = validate_token(registry, &session_id, &token, &conn_info, "Notification").await {
                 return resp;
@@ -449,24 +458,80 @@ async fn handle_request(
             let tag = registry.get_tag(&session_id).await;
             let config = config.read().await;
 
-            let text = if notification_type == "ask_user_question" {
-                format_ask_user_question(&tag, &message)
+            if notification_type == "ask_user_question" {
+                // Try to parse structured question options from extras
+                let mut sent_with_keyboard = false;
+                if let Some(ref extras_json) = extras {
+                    if let Ok(questions) = serde_json::from_str::<Vec<serde_json::Value>>(extras_json) {
+                        if let Some(first_q) = questions.first() {
+                            let options: Vec<(String, String)> = first_q
+                                .get("options")
+                                .and_then(|o| o.as_array())
+                                .map(|arr| {
+                                    arr.iter().map(|opt| {
+                                        let label = opt.get("label").and_then(|l| l.as_str()).unwrap_or("").to_string();
+                                        let desc = opt.get("description").and_then(|d| d.as_str()).unwrap_or("").to_string();
+                                        (label, desc)
+                                    }).collect()
+                                })
+                                .unwrap_or_default();
+
+                            if !options.is_empty() {
+                                let request_id = format!("q{}",
+                                    chrono::Utc::now().timestamp_millis() % 1_000_000);
+
+                                // Store pending question
+                                {
+                                    let mut pqs = pending_questions.lock().await;
+                                    pqs.insert(request_id.clone(), PendingQuestion {
+                                        session_id: session_id.clone(),
+                                        question_text: message.clone(),
+                                        options: options.iter().map(|(l, d)| QuestionOption {
+                                            label: l.clone(),
+                                            description: d.clone(),
+                                        }).collect(),
+                                        created_at: chrono::Utc::now(),
+                                    });
+                                }
+
+                                let text = format_ask_user_question_with_options(&tag, &message, &options);
+                                let keyboard = build_question_keyboard(&request_id, &options);
+
+                                for &chat_id in &config.auth.allowed_chat_ids {
+                                    enqueue_message_with_keyboard(
+                                        queue_tx, chat_id, text.clone(),
+                                        Some("MarkdownV2".to_string()), keyboard.clone(),
+                                    ).await;
+                                }
+                                sent_with_keyboard = true;
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: no structured options, show plain question
+                if !sent_with_keyboard {
+                    let text = format_ask_user_question(&tag, &message);
+                    for &chat_id in &config.auth.allowed_chat_ids {
+                        enqueue_message(queue_tx, chat_id, text.clone(), Some("MarkdownV2".to_string())).await;
+                    }
+                }
             } else {
-                format!(
+                let text = format!(
                     "{} Notification \\[{}\\]:\n{}",
                     escape_markdown_v2(&tag),
                     escape_markdown_v2(&notification_type),
                     escape_markdown_v2(&message)
-                )
-            };
-            for &chat_id in &config.auth.allowed_chat_ids {
-                enqueue_message(
-                    queue_tx,
-                    chat_id,
-                    text.clone(),
-                    Some("MarkdownV2".to_string()),
-                )
-                .await;
+                );
+                for &chat_id in &config.auth.allowed_chat_ids {
+                    enqueue_message(
+                        queue_tx,
+                        chat_id,
+                        text.clone(),
+                        Some("MarkdownV2".to_string()),
+                    )
+                    .await;
+                }
             }
             IpcResponse::Ok { message: None }
         }

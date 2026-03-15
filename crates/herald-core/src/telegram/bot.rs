@@ -25,6 +25,23 @@ pub struct PendingPermission {
 
 pub type PendingPermissions = Arc<Mutex<HashMap<String, PendingPermission>>>;
 
+/// A pending AskUserQuestion awaiting Telegram user selection
+pub struct PendingQuestion {
+    pub session_id: String,
+    pub question_text: String,
+    pub options: Vec<QuestionOption>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A single option from AskUserQuestion
+#[derive(Debug, Clone)]
+pub struct QuestionOption {
+    pub label: String,
+    pub description: String,
+}
+
+pub type PendingQuestions = Arc<Mutex<HashMap<String, PendingQuestion>>>;
+
 use super::commands::{command_handler, HeraldCommand};
 use super::handlers::{callback_handler, text_handler};
 
@@ -48,6 +65,7 @@ pub struct BotState {
     pub pending_otp: Arc<Mutex<Option<OtpRecord>>>,
     pub active_session: Arc<Mutex<Option<String>>>,
     pub pending_permissions: PendingPermissions,
+    pub pending_questions: PendingQuestions,
 }
 
 pub fn create_bot(token: &str) -> Bot {

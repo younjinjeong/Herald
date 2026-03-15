@@ -16,27 +16,31 @@ fi
 
 herald_read_token "$SESSION_ID"
 
-# --- AskUserQuestion: notify-only, no blocking (always, regardless of mode) ---
+# --- AskUserQuestion: relay with structured options to Telegram ---
 if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
     QUESTION=$(echo "$INPUT" | jq -r '.tool_input.question // .tool_input // ""' | head -c 500)
+    # Extract structured questions array for Telegram inline buttons
+    QUESTIONS_JSON=$(echo "$INPUT" | jq -c '.tool_input.questions // []' 2>/dev/null)
 
     if herald_is_unix_transport; then
         MSG=$(jq -n \
             --arg sid "$SESSION_ID" \
             --arg ntype "ask_user_question" \
             --arg msg "$QUESTION" \
-            '{"type": "Notification", "session_id": $sid, "notification_type": $ntype, "message": $msg}')
+            --arg extras "$QUESTIONS_JSON" \
+            '{"type": "Notification", "session_id": $sid, "notification_type": $ntype, "message": $msg, "extras": $extras}')
     else
         MSG=$(jq -n \
             --arg sid "$SESSION_ID" \
             --arg token "$TOKEN" \
             --arg ntype "ask_user_question" \
             --arg msg "$QUESTION" \
-            '{"type": "Notification", "session_id": $sid, "token": $token, "notification_type": $ntype, "message": $msg}')
+            --arg extras "$QUESTIONS_JSON" \
+            '{"type": "Notification", "session_id": $sid, "token": $token, "notification_type": $ntype, "message": $msg, "extras": $extras}')
     fi
 
     herald_ipc_send_with_retry "$SESSION_ID" "$MSG" >/dev/null
-    # Allow immediately — informational only
+    # Allow immediately — user can respond via Telegram buttons
     echo '{"hookSpecificOutput": {"permissionDecision": "allow"}}'
     exit 0
 fi

@@ -61,6 +61,21 @@ pub fn build_session_actions_keyboard(
     InlineKeyboardMarkup::new(buttons)
 }
 
+/// Build inline keyboard for AskUserQuestion options (one button per row)
+pub fn build_question_keyboard(request_id: &str, options: &[(String, String)]) -> InlineKeyboardMarkup {
+    let buttons: Vec<Vec<InlineKeyboardButton>> = options
+        .iter()
+        .enumerate()
+        .map(|(idx, (label, _desc))| {
+            vec![InlineKeyboardButton::callback(
+                label.clone(),
+                format!("askq:{}:{}", request_id, idx),
+            )]
+        })
+        .collect();
+    InlineKeyboardMarkup::new(buttons)
+}
+
 pub fn parse_callback_data(data: &str) -> Option<(&str, &str)> {
     data.split_once(':')
 }

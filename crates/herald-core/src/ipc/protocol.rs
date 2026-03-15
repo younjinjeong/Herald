@@ -33,6 +33,8 @@ pub enum IpcRequest {
         token: Option<String>,
         notification_type: String,
         message: String,
+        #[serde(default)]
+        extras: Option<String>,
     },
     SessionStopped {
         session_id: String,

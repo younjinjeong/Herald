@@ -212,6 +212,33 @@ pub fn format_ask_user_question(tag: &str, question: &str) -> String {
     )
 }
 
+/// Format AskUserQuestion with option descriptions in MarkdownV2
+pub fn format_ask_user_question_with_options(
+    tag: &str,
+    question: &str,
+    options: &[(String, String)],
+) -> String {
+    let mut text = format!(
+        "{} \u{2753} *Question for user*\n> {}\n",
+        escape_markdown_v2(tag),
+        escape_markdown_v2(question),
+    );
+
+    for (label, desc) in options {
+        if desc.is_empty() {
+            text.push_str(&format!("\n\u{2022} *{}*", escape_markdown_v2(label)));
+        } else {
+            text.push_str(&format!(
+                "\n\u{2022} *{}* \\- {}",
+                escape_markdown_v2(label),
+                escape_markdown_v2(desc),
+            ));
+        }
+    }
+
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

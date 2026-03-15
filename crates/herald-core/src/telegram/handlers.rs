@@ -326,6 +326,88 @@ pub async fn callback_handler(
                         .await?;
                 }
             }
+            "askq" => {
+                // AskUserQuestion response: payload is "request_id:option_index"
+                if let Some((request_id, idx_str)) = payload.split_once(':') {
+                    let option_idx: usize = idx_str.parse().unwrap_or(0);
+
+                    let pqs = state.pending_questions.lock().await;
+                    if let Some(pq) = pqs.get(request_id) {
+                        if let Some(option) = pq.options.get(option_idx) {
+                            let session_id = pq.session_id.clone();
+                            let selected_label = option.label.clone();
+                            drop(pqs);
+
+                            bot.answer_callback_query(&query.id)
+                                .text(format!("Selected: {}", selected_label))
+                                .await?;
+
+                            // Edit message to show selection and remove buttons
+                            if let Some(teloxide::types::MaybeInaccessibleMessage::Regular(msg)) =
+                                query.message
+                            {
+                                let original_text = msg.text().unwrap_or("");
+                                let _ = bot
+                                    .edit_message_text(
+                                        msg.chat.id,
+                                        msg.id,
+                                        format!("{}\n\n\u{2705} Selected: {}", original_text, selected_label),
+                                    )
+                                    .await;
+
+                                // Send the selection to Claude Code via headless continue
+                                let prompt = format!("I select: {}", selected_label);
+                                let chat_id = msg.chat.id.0;
+                                let queue_tx = state.queue_tx.clone();
+                                let config = state.config.read().await;
+                                let transport = crate::ipc::client::IpcTransport::from_config(
+                                    &config.daemon.socket_path,
+                                    &config.daemon.listen_addr,
+                                    &config.daemon.transport,
+                                );
+                                drop(config);
+
+                                let request = IpcRequest::Input {
+                                    session_id,
+                                    prompt,
+                                };
+
+                                tokio::spawn(async move {
+                                    match IpcClient::send_via(&transport, &request).await {
+                                        Ok(_) => {
+                                            info!("Question answer delivered to session");
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to deliver question answer: {}", e);
+                                            enqueue_message(
+                                                &queue_tx,
+                                                chat_id,
+                                                format!("Failed to deliver selection: {}", e),
+                                                None,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                });
+                            }
+
+                            // Remove from pending
+                            let mut pqs = state.pending_questions.lock().await;
+                            pqs.remove(request_id);
+                        } else {
+                            drop(pqs);
+                            bot.answer_callback_query(&query.id)
+                                .text("Option not found")
+                                .await?;
+                        }
+                    } else {
+                        drop(pqs);
+                        bot.answer_callback_query(&query.id)
+                            .text("Question expired")
+                            .await?;
+                    }
+                }
+            }
             _ => {
                 bot.answer_callback_query(&query.id)
                     .text("Unknown action")
