@@ -522,8 +522,11 @@ async fn handle_request(
             let config = config.read().await;
             match crate::headless::execute_prompt(&prompt, Some(&session_id)).await {
                 Ok(output) => {
+                    info!("Headless output ({} chars): {}", output.len(), &output[..output.len().min(200)]);
                     let filtered = filter_content(&output, &config.output_filter);
+                    info!("Filtered output ({} chars): {}", filtered.len(), &filtered[..filtered.len().min(200)]);
                     let text = if filtered.trim().is_empty() {
+                        warn!("Headless response is empty after filtering");
                         "(No response from Claude)".to_string()
                     } else {
                         filtered

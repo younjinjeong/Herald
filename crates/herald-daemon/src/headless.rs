@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tokio::process::Command;
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 /// Resolve the full path to the `claude` binary.
 /// Checks PATH first, then common install locations.
@@ -71,24 +71,43 @@ pub async fn execute_prompt(prompt: &str, session_id: Option<&str>) -> Result<St
 
     let output = cmd.output().await?;
 
-    if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
+    info!("Headless exit_code={}, stdout_len={}, stderr_len={}", output.status, stdout.len(), stderr.len());
+    debug!("Headless stdout (first 500): {}", &stdout[..stdout.len().min(500)]);
+    if !stderr.is_empty() {
+        warn!("Headless stderr: {}", &stderr[..stderr.len().min(200)]);
+    }
+
+    if output.status.success() {
         // If JSON format, extract the result text
         if session_id.is_some() {
+            // Try parsing entire stdout as JSON
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&stdout) {
-                // Extract result field from JSON response
                 if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                    info!("Extracted result field ({} chars)", result.len());
                     return Ok(result.to_string());
                 }
+                warn!("JSON parsed but no 'result' field found. Keys: {:?}",
+                    json.as_object().map(|o| o.keys().collect::<Vec<_>>()));
+            } else {
+                // Maybe stdout has multiple lines; try the last line as JSON
+                if let Some(last_line) = stdout.lines().rev().find(|l| l.starts_with('{')) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(last_line) {
+                        if let Some(result) = json.get("result").and_then(|r| r.as_str()) {
+                            info!("Extracted result from last JSON line ({} chars)", result.len());
+                            return Ok(result.to_string());
+                        }
+                    }
+                }
+                warn!("Failed to parse stdout as JSON, using raw output");
             }
-            // Fall back to raw output if JSON parsing fails
         }
 
         Ok(stdout)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-        error!("Headless command failed: {}", stderr);
+        error!("Headless command failed ({}): {}", output.status, stderr);
         Err(anyhow::anyhow!("Claude command failed: {}", stderr))
     }
 }
