@@ -92,7 +92,7 @@ pub fn format_completion(tag: &str, tool_count: u32, usage: Option<&TokenUsage>,
     let mut text = if tool_count > 0 {
         format!("{} \u{2705} Done \\({} tools\\)\n{}", escape_markdown_v2(tag), tool_count, separator)
     } else {
-        format!("{} \u{1f6d1} Session ended\n{}", escape_markdown_v2(tag), separator)
+        format!("{} \u{1f4ac} Responded\n{}", escape_markdown_v2(tag), separator)
     };
 
     if let Some(usage) = usage {

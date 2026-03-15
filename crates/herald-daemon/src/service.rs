@@ -157,6 +157,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
                 &config_for_reaper,
                 &queue_tx_for_reaper,
                 &activity_for_reaper,
+                &permissions_for_reaper,
             )
             .await;
             // Reap stale permission requests (>60s old)
@@ -208,19 +209,14 @@ async fn reap_dead_sessions(
     config: &Arc<RwLock<HeraldConfig>>,
     queue_tx: &mpsc::Sender<OutboundMessage>,
     activity: &ActivityTracker,
+    pending_permissions: &PendingPermissions,
 ) {
     let sessions = registry.list().await;
     for session in &sessions {
-        let should_reap = !crate::pty::is_process_alive(session.pid)
-            || session.state == "Stopped";
+        let should_reap = !crate::pty::is_process_alive(session.pid);
         if should_reap {
             let tag = registry.get_tag(&session.id).await;
-            let reason = if session.state == "Stopped" {
-                "stopped session cleanup"
-            } else {
-                "process exited"
-            };
-            info!("Reaping session {} ({})", session.id, reason);
+            info!("Reaping session {} (process exited)", session.id);
 
             // Clean up activity state
             {
@@ -235,13 +231,18 @@ async fn reap_dead_sessions(
             // Unregister
             let _ = registry.unregister(&session.id).await;
 
+            // Clean up pending permissions for this session
+            {
+                let mut perms = pending_permissions.lock().await;
+                perms.retain(|_id, perm| perm.session_id != *session.id);
+            }
+
             // Clean up token file
             let token_file = format!("/tmp/herald/tokens/{}", session.id);
             let _ = std::fs::remove_file(&token_file);
 
-            // Notify Telegram (only for unexpected deaths, not for Stopped sessions
-            // which already sent their completion message)
-            if session.state != "Stopped" {
+            // Notify Telegram about unexpected process death
+            {
                 let config = config.read().await;
                 let text = format!("{} Session lost \\(process exited\\)", escape_markdown_v2(&tag));
                 for &chat_id in &config.auth.allowed_chat_ids {
@@ -360,6 +361,11 @@ async fn handle_request(
                         handle.abort();
                     }
                 }
+            }
+            // Clean up pending permissions for this session
+            {
+                let mut perms = pending_permissions.lock().await;
+                perms.retain(|_id, perm| perm.session_id != session_id);
             }
             let tag = registry.get_tag(&session_id).await;
             match registry.unregister(&session_id).await {
@@ -486,9 +492,8 @@ async fn handle_request(
 
             let tag = registry.get_tag(&session_id).await;
 
-            // Get token usage; mark session as Stopped (let Unregister do actual removal)
+            // Get token usage (session stays Active — only Unregister marks true end)
             let usage = registry.get_token_usage(&session_id).await;
-            registry.update_state(&session_id, SessionState::Stopped).await;
 
             // Build rich completion message
             let (tool_count, stored_response) = activity_info.unwrap_or((0, None));
