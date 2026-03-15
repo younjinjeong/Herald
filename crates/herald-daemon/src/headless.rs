@@ -48,10 +48,11 @@ pub async fn execute_prompt(prompt: &str, session_id: Option<&str>) -> Result<St
     // overwrite and then destroy the original interactive session's registration
     cmd.env("HERALD_HEADLESS", "1");
 
-    if let Some(sid) = session_id {
-        // Resume specific session by ID with JSON output for richer parsing
-        cmd.arg("--resume")
-            .arg(sid)
+    if let Some(_sid) = session_id {
+        // Continue the most recent conversation with JSON output for richer parsing
+        // Note: --continue targets the latest conversation; --resume only works for
+        // inactive sessions and fails on currently active ones.
+        cmd.arg("--continue")
             .arg("-p")
             .arg(prompt)
             .arg("--output-format")
