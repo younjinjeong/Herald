@@ -523,8 +523,13 @@ async fn handle_request(
             match crate::headless::execute_prompt(&prompt, Some(&session_id)).await {
                 Ok(output) => {
                     let filtered = filter_content(&output, &config.output_filter);
+                    let text = if filtered.trim().is_empty() {
+                        "(No response from Claude)".to_string()
+                    } else {
+                        filtered
+                    };
                     for &chat_id in &config.auth.allowed_chat_ids {
-                        let parts = split_message(&filtered, 4096);
+                        let parts = split_message(&text, 4096);
                         for part in parts {
                             enqueue_message(queue_tx, chat_id, part, None).await;
                         }
