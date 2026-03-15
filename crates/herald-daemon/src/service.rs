@@ -1,30 +1,79 @@
 use anyhow::Result;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use herald_core::config::HeraldConfig;
 use herald_core::ipc::protocol::{IpcRequest, IpcResponse};
 use herald_core::ipc::server::IpcServer;
+use herald_core::security::content_filter::filter_content;
 use herald_core::session::registry::SessionRegistry;
 use herald_core::session::token::generate_token;
-use herald_core::types::{SessionId, SessionInfo, SessionState, SessionToken};
-use std::sync::Arc;
-use tokio::sync::watch;
+use herald_core::telegram::bot::{
+    create_bot, drain_queue, enqueue_message, run_bot, BotState, OutboundMessage,
+};
+use herald_core::telegram::formatting::{escape_markdown_v2, format_tool_output};
+use herald_core::types::{SessionId, SessionInfo, SessionState};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tracing::{error, info};
 
 pub async fn run(config: HeraldConfig) -> Result<()> {
-    let registry = SessionRegistry::new();
     let start_time = chrono::Utc::now();
+    let config_path = HeraldConfig::default_path();
+    let registry = SessionRegistry::new();
+    let telegram_connected = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-    // Start IPC server
-    let mut ipc_server = IpcServer::bind(&config.daemon.socket_path).await?;
+    // Create message queue
+    let (queue_tx, queue_rx) = mpsc::channel::<OutboundMessage>(256);
 
-    let registry_clone = registry.clone();
+    // Create bot and shared state
+    let bot_token = config.get_bot_token()?;
+    let bot = create_bot(&bot_token);
+
+    let config_arc = Arc::new(RwLock::new(config));
+
+    let bot_state = BotState {
+        config: config_arc.clone(),
+        config_path: config_path.clone(),
+        registry: registry.clone(),
+        queue_tx: queue_tx.clone(),
+        telegram_connected: telegram_connected.clone(),
+        start_time,
+        pending_otp: Arc::new(Mutex::new(None)),
+        active_session: Arc::new(Mutex::new(None)),
+    };
+
+    // Task 1: IPC server
+    let config_for_ipc = config_arc.clone();
+    let registry_for_ipc = registry.clone();
+    let queue_tx_for_ipc = queue_tx.clone();
+    let telegram_connected_for_ipc = telegram_connected.clone();
+    let shutdown_tx_clone = shutdown_tx.clone();
+
+    let mut ipc_server = {
+        let config = config_for_ipc.read().await;
+        IpcServer::bind(&config.daemon.socket_path).await?
+    };
+
     let ipc_handle = tokio::spawn(async move {
-        let registry = registry_clone;
+        let registry = registry_for_ipc;
+        let config = config_for_ipc;
+        let queue_tx = queue_tx_for_ipc;
+        let tc = telegram_connected_for_ipc;
         let start = start_time;
+        let shutdown = shutdown_tx_clone;
+
         if let Err(e) = ipc_server
             .run(move |request| {
                 let registry = registry.clone();
-                async move { handle_request(request, &registry, start).await }
+                let config = config.clone();
+                let queue_tx = queue_tx.clone();
+                let tc = tc.clone();
+                let shutdown = shutdown.clone();
+                async move {
+                    handle_request(request, &registry, &config, &queue_tx, &tc, start, &shutdown)
+                        .await
+                }
             })
             .await
         {
@@ -32,7 +81,20 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         }
     });
 
-    // Start signal handler
+    // Task 2: Telegram bot polling
+    let bot_clone = bot.clone();
+    let bot_state_clone = bot_state.clone();
+    let telegram_handle = tokio::spawn(async move {
+        run_bot(bot_clone, bot_state_clone).await;
+    });
+
+    // Task 3: Message queue drain
+    let bot_for_queue = bot.clone();
+    let queue_handle = tokio::spawn(async move {
+        drain_queue(queue_rx, bot_for_queue).await;
+    });
+
+    // Task 4: Signal handler
     let signal_handle = tokio::spawn(async move {
         crate::signal::wait_for_shutdown().await;
         let _ = shutdown_tx.send(true);
@@ -42,7 +104,21 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     shutdown_rx.changed().await?;
     info!("Shutting down Herald daemon...");
 
+    // Notify Telegram users
+    {
+        let config = config_arc.read().await;
+        for &chat_id in &config.auth.allowed_chat_ids {
+            enqueue_message(&queue_tx, chat_id, "Herald daemon shutting down.".to_string(), None)
+                .await;
+        }
+    }
+
+    // Brief delay to flush queue
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
     ipc_handle.abort();
+    telegram_handle.abort();
+    queue_handle.abort();
     signal_handle.abort();
 
     Ok(())
@@ -51,7 +127,11 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
 async fn handle_request(
     request: IpcRequest,
     registry: &SessionRegistry,
+    config: &Arc<RwLock<HeraldConfig>>,
+    queue_tx: &mpsc::Sender<OutboundMessage>,
+    telegram_connected: &Arc<AtomicBool>,
     start_time: chrono::DateTime<chrono::Utc>,
+    shutdown_tx: &watch::Sender<bool>,
 ) -> IpcResponse {
     match request {
         IpcRequest::Register {
@@ -64,7 +144,7 @@ async fn handle_request(
                 id: SessionId(session_id.clone()),
                 token: token.clone(),
                 pid,
-                cwd: cwd.into(),
+                cwd: cwd.clone().into(),
                 state: SessionState::Active,
                 started_at: chrono::Utc::now(),
                 last_activity: chrono::Utc::now(),
@@ -72,6 +152,12 @@ async fn handle_request(
             match registry.register(info).await {
                 Ok(()) => {
                     info!("Session registered: {} (PID {})", session_id, pid);
+                    // Notify Telegram
+                    let config = config.read().await;
+                    let text = format!("New session started: {}\nDir: {}", session_id, cwd);
+                    for &chat_id in &config.auth.allowed_chat_ids {
+                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                    }
                     IpcResponse::Registered { token: token.0 }
                 }
                 Err(e) => IpcResponse::Error {
@@ -90,6 +176,11 @@ async fn handle_request(
             match registry.unregister(&session_id).await {
                 Ok(()) => {
                     info!("Session unregistered: {}", session_id);
+                    let config = config.read().await;
+                    let text = format!("Session ended: {}", session_id);
+                    for &chat_id in &config.auth.allowed_chat_ids {
+                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                    }
                     IpcResponse::Ok {
                         message: Some("Session unregistered".to_string()),
                     }
@@ -101,7 +192,11 @@ async fn handle_request(
             }
         }
         IpcRequest::Output {
-            session_id, token, ..
+            session_id,
+            token,
+            tool_name,
+            tool_input_summary,
+            tool_response_summary,
         } => {
             if !registry.validate_token(&session_id, &token).await {
                 return IpcResponse::Error {
@@ -110,11 +205,31 @@ async fn handle_request(
                 };
             }
             registry.update_activity(&session_id).await;
-            // TODO: Forward to Telegram via message queue
+
+            let config = config.read().await;
+            let filtered =
+                filter_content(&tool_response_summary, &config.output_filter);
+            let text = format_tool_output(
+                &tool_name,
+                &filtered,
+                config.output_filter.code_preview_lines,
+            );
+            for &chat_id in &config.auth.allowed_chat_ids {
+                enqueue_message(
+                    queue_tx,
+                    chat_id,
+                    text.clone(),
+                    Some("MarkdownV2".to_string()),
+                )
+                .await;
+            }
             IpcResponse::Ok { message: None }
         }
         IpcRequest::Notification {
-            session_id, token, ..
+            session_id,
+            token,
+            notification_type,
+            message,
         } => {
             if !registry.validate_token(&session_id, &token).await {
                 return IpcResponse::Error {
@@ -122,11 +237,28 @@ async fn handle_request(
                     message: "Invalid session token".to_string(),
                 };
             }
-            // TODO: Forward notification to Telegram
+
+            let config = config.read().await;
+            let text = format!(
+                "Notification [{}]:\n{}",
+                escape_markdown_v2(&notification_type),
+                escape_markdown_v2(&message)
+            );
+            for &chat_id in &config.auth.allowed_chat_ids {
+                enqueue_message(
+                    queue_tx,
+                    chat_id,
+                    text.clone(),
+                    Some("MarkdownV2".to_string()),
+                )
+                .await;
+            }
             IpcResponse::Ok { message: None }
         }
         IpcRequest::SessionStopped {
-            session_id, token, ..
+            session_id,
+            token,
+            last_message,
         } => {
             if !registry.validate_token(&session_id, &token).await {
                 return IpcResponse::Error {
@@ -135,12 +267,34 @@ async fn handle_request(
                 };
             }
             let _ = registry.unregister(&session_id).await;
+
+            let config = config.read().await;
+            let text = format!("Session {} stopped.", session_id);
+            for &chat_id in &config.auth.allowed_chat_ids {
+                enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+            }
             IpcResponse::Ok { message: None }
         }
-        IpcRequest::Input { .. } => {
-            // TODO: Route to headless or PTY
-            IpcResponse::Ok {
-                message: Some("Input received".to_string()),
+        IpcRequest::Input {
+            session_id,
+            prompt,
+        } => {
+            // Execute via headless mode
+            let config = config.read().await;
+            match crate::headless::execute_prompt(&prompt).await {
+                Ok(output) => {
+                    let filtered = filter_content(&output, &config.output_filter);
+                    for &chat_id in &config.auth.allowed_chat_ids {
+                        enqueue_message(queue_tx, chat_id, filtered.clone(), None).await;
+                    }
+                    IpcResponse::Ok {
+                        message: Some("Prompt executed".to_string()),
+                    }
+                }
+                Err(e) => IpcResponse::Error {
+                    code: 500,
+                    message: format!("Headless execution failed: {}", e),
+                },
             }
         }
         IpcRequest::Health => {
@@ -149,7 +303,7 @@ async fn handle_request(
             IpcResponse::HealthStatus {
                 uptime_secs: uptime,
                 session_count,
-                telegram_connected: false, // TODO: Check actual Telegram connection
+                telegram_connected: telegram_connected.load(Ordering::Relaxed),
             }
         }
         IpcRequest::ListSessions => {
@@ -158,6 +312,7 @@ async fn handle_request(
         }
         IpcRequest::Shutdown => {
             info!("Shutdown requested via IPC");
+            let _ = shutdown_tx.send(true);
             IpcResponse::Ok {
                 message: Some("Shutting down".to_string()),
             }
