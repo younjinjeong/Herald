@@ -276,8 +276,14 @@ pub async fn callback_handler(
                 if let Some(mut modes) = state.registry.get_modes(session_id).await {
                     if action == "toggle_plan" {
                         modes.plan_mode = !modes.plan_mode;
+                        if modes.plan_mode {
+                            modes.bypass_permissions = false;
+                        }
                     } else {
                         modes.bypass_permissions = !modes.bypass_permissions;
+                        if modes.bypass_permissions {
+                            modes.plan_mode = false;
+                        }
                     }
                     state
                         .registry
