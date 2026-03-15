@@ -48,6 +48,10 @@ pub async fn execute_prompt(prompt: &str, session_id: Option<&str>) -> Result<St
     // overwrite and then destroy the original interactive session's registration
     cmd.env("HERALD_HEADLESS", "1");
 
+    // Skip Claude Code's built-in permission prompts — the Telegram user is
+    // OTP-authenticated and explicitly sending this prompt
+    cmd.arg("--dangerously-skip-permissions");
+
     if let Some(_sid) = session_id {
         // Continue the most recent conversation with JSON output for richer parsing
         // Note: --continue targets the latest conversation; --resume only works for
