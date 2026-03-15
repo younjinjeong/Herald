@@ -45,10 +45,10 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
     # Get the last line with usage data
     USAGE_LINE=$(grep '"usage"' "$TRANSCRIPT" 2>/dev/null | tail -1 || true)
     if [ -n "$USAGE_LINE" ]; then
-        INPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.usage.input_tokens // 0' 2>/dev/null || echo 0)
-        OUTPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.usage.output_tokens // 0' 2>/dev/null || echo 0)
-        CACHE_READ=$(echo "$USAGE_LINE" | jq -r '.usage.cache_read_input_tokens // 0' 2>/dev/null || echo 0)
-        CACHE_CREATE=$(echo "$USAGE_LINE" | jq -r '.usage.cache_creation_input_tokens // 0' 2>/dev/null || echo 0)
+        INPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.message.usage.input_tokens // 0' 2>/dev/null || echo 0)
+        OUTPUT_TOKENS=$(echo "$USAGE_LINE" | jq -r '.message.usage.output_tokens // 0' 2>/dev/null || echo 0)
+        CACHE_READ=$(echo "$USAGE_LINE" | jq -r '.message.usage.cache_read_input_tokens // 0' 2>/dev/null || echo 0)
+        CACHE_CREATE=$(echo "$USAGE_LINE" | jq -r '.message.usage.cache_creation_input_tokens // 0' 2>/dev/null || echo 0)
 
         # Estimate cost (Claude Sonnet 4 pricing: $3/M input, $15/M output)
         COST=$(echo "scale=6; ($INPUT_TOKENS * 0.000003) + ($OUTPUT_TOKENS * 0.000015)" | bc 2>/dev/null || echo "0")
