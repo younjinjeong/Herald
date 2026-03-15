@@ -204,13 +204,46 @@ herald send --tcp daemon-host:7272 session-id "Fix the auth bug"
 | Command | Description |
 |---------|-------------|
 | `/start` | Connect and show auth status |
-| `/sessions` | List active Claude Code sessions (with selection buttons) |
+| `/sessions` | List sessions with color tags and active indicator |
 | `/status` | Show daemon uptime, session count, connection status |
 | `/tokens` | Show token usage and cost across all sessions |
 | `/log` | Show recent conversation log for selected session |
 | `/help` | Command reference |
 
-Send any **text message** to forward it as a prompt to the selected Claude Code session.
+### Sending Prompts
+
+Three ways to target a session when sending a message:
+
+| Method | Example | Effect |
+|--------|---------|--------|
+| **Active session** | Just type text | Goes to session selected via `/sessions` |
+| **@prefix** | `@ml-pipeline run the tests` | Routes to named session without switching active |
+| **Reply** | Reply to any tagged message | Auto-routes to that session |
+
+---
+
+## Session Tagging
+
+Each session gets a color emoji and short name (derived from working directory). All messages in the shared bot chat are tagged:
+
+```
+🟢 [project-api] 🔧 Tool: Edit login.rs (+5 -2)
+🟡 [ml-pipeline] 🤖 Claude: Starting training job...
+🟢 [project-api] 📊 Tokens: 12.4K in / 3.2K out
+🟡 [ml-pipeline] 👤 You: "Show the loss curve"
+```
+
+Colors cycle through 🟢 🟡 🔵 🟣 🟠 as sessions register. The `/sessions` command shows an active indicator:
+
+```
+Active Sessions:
+
+🟢 [project-api] (api) ◀ active
+🟡 [ml-pipeline] (ml-pipeline)
+
+Tap a session to select it.
+Tip: @name or reply to target a session.
+```
 
 ---
 
