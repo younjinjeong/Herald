@@ -13,8 +13,9 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("heraldd=info".parse()?),
+                .add_directive(tracing_subscriber::filter::LevelFilter::INFO.into()),
         )
+        .with_writer(std::io::stderr)
         .init();
 
     info!("Herald daemon starting...");

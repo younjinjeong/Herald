@@ -24,9 +24,29 @@ pub async fn run() -> Result<()> {
 
     // Spawn heraldd as background process
     println!("Starting Herald daemon...");
+
+    // Log to file so we can debug
+    let log_dir = config.daemon.socket_path.parent()
+        .unwrap_or(std::path::Path::new("/tmp/herald"));
+    let _ = std::fs::create_dir_all(log_dir);
+    let log_path = log_dir.join("heraldd.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .ok();
+
+    let stderr_out = match log_file {
+        Some(f) => {
+            println!("  Log: {}", log_path.display());
+            std::process::Stdio::from(f)
+        }
+        None => std::process::Stdio::null(),
+    };
+
     let child = std::process::Command::new("heraldd")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr_out)
         .spawn()
         .map_err(|e| {
             anyhow::anyhow!(

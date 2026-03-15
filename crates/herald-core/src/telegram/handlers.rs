@@ -1,8 +1,10 @@
 use teloxide::prelude::*;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use crate::auth::chat_id::{authorize, is_authorized};
 use crate::auth::otp::verify_otp;
+use crate::ipc::client::IpcClient;
+use crate::ipc::protocol::IpcRequest;
 use crate::telegram::bot::{enqueue_message, BotState};
 use crate::telegram::callbacks::parse_callback_data;
 use crate::types::SESSION_COLORS;
@@ -79,16 +81,47 @@ pub async fn text_handler(bot: Bot, msg: Message, state: BotState) -> ResponseRe
     // Get session tag for confirmation
     let tag = state.registry.get_tag(&session_id).await;
     info!("Forwarding prompt to session {}: {}", session_id, prompt);
-    bot.send_message(msg.chat.id, format!("{} Sending prompt...", tag))
-        .await?;
 
-    enqueue_message(
-        &state.queue_tx,
-        chat_id,
-        format!("{} Prompt forwarded", tag),
-        None,
-    )
-    .await;
+    // Forward the prompt to the session via IPC Input request
+    let config = state.config.read().await;
+    let transport = crate::ipc::client::IpcTransport::from_config(
+        &config.daemon.socket_path,
+        &config.daemon.listen_addr,
+        &config.daemon.transport,
+    );
+    drop(config);
+
+    let request = IpcRequest::Input {
+        session_id: session_id.clone(),
+        prompt: prompt.clone(),
+    };
+
+    let queue_tx = state.queue_tx.clone();
+    let tag_clone = tag.clone();
+    tokio::spawn(async move {
+        match IpcClient::send_via(&transport, &request).await {
+            Ok(resp) => {
+                info!("Input forwarded to session: {:?}", resp);
+                enqueue_message(
+                    &queue_tx,
+                    chat_id,
+                    format!("{} \u{1f4e8} Delivered", tag_clone),
+                    None,
+                )
+                .await;
+            }
+            Err(e) => {
+                error!("Failed to forward input: {}", e);
+                enqueue_message(
+                    &queue_tx,
+                    chat_id,
+                    format!("{} Failed to forward prompt: {}", tag_clone, e),
+                    None,
+                )
+                .await;
+            }
+        }
+    });
 
     Ok(())
 }

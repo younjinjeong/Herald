@@ -2,10 +2,17 @@
 # Herald hook: UserPromptSubmit
 # Captures user prompt and sends to daemon for conversation logging
 
+source "/home/younjinjeong/.config/herald/plugin/hooks/herald-common.sh"
+
 INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-TOKEN=$(echo "$INPUT" | jq -r '.herald_token // empty')
+
+# Read persisted token from file
+TOKEN=""
+if [ -n "$SESSION_ID" ] && [ -f "/tmp/herald/tokens/$SESSION_ID" ]; then
+    TOKEN=$(cat "/tmp/herald/tokens/$SESSION_ID")
+fi
 PROMPT=$(echo "$INPUT" | jq -r '.prompt // empty')
 
 if [ -z "$SESSION_ID" ] || [ -z "$PROMPT" ]; then
@@ -22,8 +29,4 @@ MSG=$(jq -n \
     --arg ts "$TIMESTAMP" \
     '{"type": "ConversationEntry", "session_id": $sid, "token": $token, "entry_type": $etype, "content": $content, "timestamp": $ts}')
 
-if [ -n "$HERALD_DAEMON_ADDR" ]; then
-    echo "$MSG" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null || true
-else
-    echo "$MSG" | herald ipc-send 2>/dev/null || true
-fi
+herald_ipc_send_with_retry "$SESSION_ID" "$MSG" >/dev/null

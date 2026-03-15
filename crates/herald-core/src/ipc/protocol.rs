@@ -11,6 +11,8 @@ pub enum IpcRequest {
         session_id: String,
         pid: u32,
         cwd: String,
+        #[serde(default)]
+        tmux_pane: Option<String>,
     },
     Unregister {
         session_id: String,

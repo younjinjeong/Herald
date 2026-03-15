@@ -1,12 +1,17 @@
 #!/bin/bash
-# Herald hook: PostToolUse
-# Relays tool output to Telegram via Herald daemon
-# Also extracts token usage from transcript
+# Herald hook: PostToolUse — v2 with auto-retry
+
+source "/home/younjinjeong/.config/herald/plugin/hooks/herald-common.sh"
 
 INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
-TOKEN=$(echo "$INPUT" | jq -r '.herald_token // empty')
+
+# Read persisted token from file
+TOKEN=""
+if [ -n "$SESSION_ID" ] && [ -f "/tmp/herald/tokens/$SESSION_ID" ]; then
+    TOKEN=$(cat "/tmp/herald/tokens/$SESSION_ID")
+fi
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
 TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input // {} | tostring' | head -c 500)
 TOOL_RESPONSE=$(echo "$INPUT" | jq -r '.tool_response // {} | tostring' | head -c 1000)
@@ -16,7 +21,7 @@ if [ -z "$SESSION_ID" ]; then
     exit 0
 fi
 
-# Send tool output
+# Send tool output (with auto re-register on 401)
 MSG=$(jq -n \
     --arg sid "$SESSION_ID" \
     --arg token "$TOKEN" \
@@ -25,14 +30,15 @@ MSG=$(jq -n \
     --arg tresp "$TOOL_RESPONSE" \
     '{"type": "Output", "session_id": $sid, "token": $token, "tool_name": $tool, "tool_input_summary": $tinput, "tool_response_summary": $tresp}')
 
-if [ -n "$HERALD_DAEMON_ADDR" ]; then
-    echo "$MSG" | herald ipc-send --tcp "$HERALD_DAEMON_ADDR" 2>/dev/null || true
-else
-    echo "$MSG" | herald ipc-send 2>/dev/null || true
-fi
+herald_ipc_send_with_retry "$SESSION_ID" "$MSG" >/dev/null
 
 # Extract token usage from transcript (if available)
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
+    # Re-read token (may have been updated by re-registration above)
+    if [ -f "/tmp/herald/tokens/$SESSION_ID" ]; then
+        TOKEN=$(cat "/tmp/herald/tokens/$SESSION_ID")
+    fi
+
     # Get the last line with usage data
     USAGE_LINE=$(grep '"usage"' "$TRANSCRIPT" 2>/dev/null | tail -1 || true)
     if [ -n "$USAGE_LINE" ]; then
@@ -54,6 +60,6 @@ if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
             --argjson cost "${COST:-0}" \
             '{"type": "TokenUpdate", "session_id": $sid, "token": $token, "input_tokens": $itok, "output_tokens": $otok, "cache_read_tokens": $cread, "cache_creation_tokens": $ccreate, "total_cost_usd": $cost}')
 
-        echo "$TOKEN_MSG" | herald ipc-send 2>/dev/null || true
+        herald_ipc_send "$TOKEN_MSG" >/dev/null
     fi
 fi

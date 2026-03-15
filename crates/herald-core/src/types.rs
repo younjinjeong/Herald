@@ -51,6 +51,8 @@ pub struct SessionInfo {
     pub token_usage: TokenUsage,
     #[serde(default)]
     pub conversation_log: Vec<ConversationEntry>,
+    #[serde(default)]
+    pub tmux_pane: Option<String>,
 }
 
 impl SessionInfo {
