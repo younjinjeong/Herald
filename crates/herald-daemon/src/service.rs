@@ -406,6 +406,7 @@ async fn handle_request(
                 return resp;
             }
             registry.update_activity(&session_id).await;
+            info!("Tool activity: session={}, tool={}", &session_id[..8.min(session_id.len())], tool_name);
 
             // Send compact tool activity to Telegram
             {
