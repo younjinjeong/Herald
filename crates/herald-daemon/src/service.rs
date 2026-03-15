@@ -213,7 +213,7 @@ async fn handle_request(
             session_id,
             token,
             tool_name,
-            tool_input_summary,
+            tool_input_summary: _,
             tool_response_summary,
         } => {
             if !registry.validate_token(&session_id, &token).await {
@@ -280,7 +280,7 @@ async fn handle_request(
         IpcRequest::SessionStopped {
             session_id,
             token,
-            last_message,
+            last_message: _,
         } => {
             if !registry.validate_token(&session_id, &token).await {
                 return IpcResponse::Error {
@@ -299,7 +299,7 @@ async fn handle_request(
             IpcResponse::Ok { message: None }
         }
         IpcRequest::Input {
-            session_id,
+            session_id: _,
             prompt,
         } => {
             // Execute via headless mode

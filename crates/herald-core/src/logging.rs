@@ -53,6 +53,7 @@ impl ConversationLogger {
         }
     }
 
+    #[allow(dead_code)]
     fn write_line(&self, line: &str) {
         // Stdout output (for containers/Loki)
         if self.output == LogOutput::Stdout || self.output == LogOutput::Both {

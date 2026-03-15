@@ -41,7 +41,7 @@ pub async fn run() -> Result<()> {
     let mut attempts = 0;
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        if let Ok(response) =
+        if let Ok(_) =
             IpcClient::send(&config.daemon.socket_path, &IpcRequest::Health).await
         {
             println!("  Herald daemon is ready.");
