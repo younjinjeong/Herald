@@ -5,6 +5,7 @@ use std::sync::Arc;
 use herald_core::config::HeraldConfig;
 use herald_core::ipc::protocol::{IpcRequest, IpcResponse};
 use herald_core::ipc::server::IpcServer;
+use herald_core::logging::ConversationLogger;
 use herald_core::security::content_filter::filter_content;
 use herald_core::session::registry::SessionRegistry;
 use herald_core::session::token::generate_token;
@@ -12,7 +13,7 @@ use herald_core::telegram::bot::{
     create_bot, drain_queue, enqueue_message, run_bot, BotState, OutboundMessage,
 };
 use herald_core::telegram::formatting::{escape_markdown_v2, format_tool_output};
-use herald_core::types::{SessionId, SessionInfo, SessionState};
+use herald_core::types::{ConversationEntry, SessionId, SessionInfo, SessionState, TokenUsage};
 use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tracing::{error, info};
 
@@ -22,6 +23,9 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
     let registry = SessionRegistry::new();
     let telegram_connected = Arc::new(AtomicBool::new(false));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    // Create conversation logger
+    let logger = Arc::new(ConversationLogger::default());
 
     // Create message queue
     let (queue_tx, queue_rx) = mpsc::channel::<OutboundMessage>(256);
@@ -55,6 +59,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         IpcServer::bind(&config.daemon.socket_path).await?
     };
 
+    let logger_for_ipc = logger.clone();
     let ipc_handle = tokio::spawn(async move {
         let registry = registry_for_ipc;
         let config = config_for_ipc;
@@ -62,6 +67,7 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
         let tc = telegram_connected_for_ipc;
         let start = start_time;
         let shutdown = shutdown_tx_clone;
+        let logger = logger_for_ipc;
 
         if let Err(e) = ipc_server
             .run(move |request| {
@@ -70,8 +76,9 @@ pub async fn run(config: HeraldConfig) -> Result<()> {
                 let queue_tx = queue_tx.clone();
                 let tc = tc.clone();
                 let shutdown = shutdown.clone();
+                let logger = logger.clone();
                 async move {
-                    handle_request(request, &registry, &config, &queue_tx, &tc, start, &shutdown)
+                    handle_request(request, &registry, &config, &queue_tx, &tc, start, &shutdown, &logger)
                         .await
                 }
             })
@@ -132,6 +139,7 @@ async fn handle_request(
     telegram_connected: &Arc<AtomicBool>,
     start_time: chrono::DateTime<chrono::Utc>,
     shutdown_tx: &watch::Sender<bool>,
+    logger: &ConversationLogger,
 ) -> IpcResponse {
     match request {
         IpcRequest::Register {
@@ -148,6 +156,8 @@ async fn handle_request(
                 state: SessionState::Active,
                 started_at: chrono::Utc::now(),
                 last_activity: chrono::Utc::now(),
+                token_usage: TokenUsage::default(),
+                conversation_log: Vec::new(),
             };
             match registry.register(info).await {
                 Ok(()) => {
@@ -297,6 +307,115 @@ async fn handle_request(
                 },
             }
         }
+        IpcRequest::TokenUpdate {
+            session_id,
+            token,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_creation_tokens,
+            total_cost_usd,
+        } => {
+            if !registry.validate_token(&session_id, &token).await {
+                return IpcResponse::Error {
+                    code: 401,
+                    message: "Invalid session token".to_string(),
+                };
+            }
+
+            let usage = TokenUsage {
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_creation_tokens,
+                total_cost_usd,
+            };
+
+            registry.update_token_usage(&session_id, usage.clone()).await;
+            logger.log_token_usage(&session_id, &usage);
+
+            // Send live-updating token message to Telegram
+            let config = config.read().await;
+            let text = format!(
+                "\u{1f4ca} Session: {}\n\
+                 \u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\u{2501}\n\
+                 Tokens: {} in / {} out\n\
+                 Cache:  {} read / {} created\n\
+                 Cost:   ${:.4}\n\
+                 Updated: {}",
+                session_id,
+                format_num(input_tokens),
+                format_num(output_tokens),
+                format_num(cache_read_tokens),
+                format_num(cache_creation_tokens),
+                total_cost_usd,
+                chrono::Utc::now().format("%H:%M:%S"),
+            );
+            for &chat_id in &config.auth.allowed_chat_ids {
+                enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+            }
+
+            IpcResponse::Ok { message: None }
+        }
+        IpcRequest::ConversationEntry {
+            session_id,
+            token,
+            entry_type,
+            content,
+            timestamp,
+        } => {
+            if !registry.validate_token(&session_id, &token).await {
+                return IpcResponse::Error {
+                    code: 401,
+                    message: "Invalid session token".to_string(),
+                };
+            }
+
+            let ts = chrono::DateTime::parse_from_rfc3339(&timestamp)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or_else(|_| chrono::Utc::now());
+
+            let entry = ConversationEntry {
+                timestamp: ts,
+                entry_type: entry_type.clone(),
+                content: content.clone(),
+            };
+
+            registry.add_conversation_entry(&session_id, entry).await;
+
+            // Log to file
+            match entry_type.as_str() {
+                "user_prompt" => {
+                    logger.log_user_prompt(&session_id, &content);
+                    let config = config.read().await;
+                    let text = format!("\u{1f464} You: \"{}\"", &content);
+                    for &chat_id in &config.auth.allowed_chat_ids {
+                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                    }
+                }
+                "assistant_response" => {
+                    logger.log_assistant_response(&session_id, &content);
+                    let config = config.read().await;
+                    // Truncate long responses
+                    let display = if content.len() > 500 {
+                        format!("{}...", &content[..500])
+                    } else {
+                        content.clone()
+                    };
+                    let text = format!("\u{1f916} Claude: {}", display);
+                    for &chat_id in &config.auth.allowed_chat_ids {
+                        enqueue_message(queue_tx, chat_id, text.clone(), None).await;
+                    }
+                }
+                "tool_summary" => {
+                    logger.log_tool_summary(&session_id, &content);
+                    // Tool summaries already sent via Output handler, skip duplicate
+                }
+                _ => {}
+            }
+
+            IpcResponse::Ok { message: None }
+        }
         IpcRequest::Health => {
             let uptime = (chrono::Utc::now() - start_time).num_seconds() as u64;
             let session_count = registry.count().await;
@@ -317,5 +436,15 @@ async fn handle_request(
                 message: Some("Shutting down".to_string()),
             }
         }
+    }
+}
+
+fn format_num(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }

@@ -16,6 +16,10 @@ pub enum HeraldCommand {
     Sessions,
     #[command(description = "Show Herald daemon status")]
     Status,
+    #[command(description = "Show token usage across sessions")]
+    Tokens,
+    #[command(description = "Show recent conversation log")]
+    Log,
     #[command(description = "Show help")]
     Help,
 }
@@ -30,6 +34,8 @@ pub async fn command_handler(
         HeraldCommand::Start => handle_start(bot, msg, state).await,
         HeraldCommand::Sessions => handle_sessions(bot, msg, state).await,
         HeraldCommand::Status => handle_status(bot, msg, state).await,
+        HeraldCommand::Tokens => handle_tokens(bot, msg, state).await,
+        HeraldCommand::Log => handle_log(bot, msg, state).await,
         HeraldCommand::Help => handle_help(bot, msg, state).await,
     }
 }
@@ -109,11 +115,122 @@ async fn handle_status(bot: Bot, msg: Message, state: BotState) -> ResponseResul
     Ok(())
 }
 
+async fn handle_tokens(bot: Bot, msg: Message, state: BotState) -> ResponseResult<()> {
+    let config = state.config.read().await;
+    if !is_authorized(&config, msg.chat.id.0) {
+        bot.send_message(msg.chat.id, "Unauthorized.").await?;
+        return Ok(());
+    }
+    drop(config);
+
+    let total = state.registry.total_token_usage().await;
+    let sessions = state.registry.list().await;
+
+    let mut text = format!(
+        "Token Usage Summary\n\
+         ━━━━━━━━━━━━━━━━━━━━\n\
+         Total: {} in / {} out\n\
+         Cache: {} read / {} created\n\
+         Cost:  ${:.4}\n",
+        format_number(total.input_tokens),
+        format_number(total.output_tokens),
+        format_number(total.cache_read_tokens),
+        format_number(total.cache_creation_tokens),
+        total.total_cost_usd,
+    );
+
+    if !sessions.is_empty() {
+        text.push_str("\nPer session:\n");
+        for s in &sessions {
+            text.push_str(&format!(
+                "  {} — {} in / {} out (${:.4})\n",
+                s.id,
+                format_number(s.token_usage.input_tokens),
+                format_number(s.token_usage.output_tokens),
+                s.token_usage.total_cost_usd,
+            ));
+        }
+    }
+
+    bot.send_message(msg.chat.id, text).await?;
+    Ok(())
+}
+
+async fn handle_log(bot: Bot, msg: Message, state: BotState) -> ResponseResult<()> {
+    let config = state.config.read().await;
+    if !is_authorized(&config, msg.chat.id.0) {
+        bot.send_message(msg.chat.id, "Unauthorized.").await?;
+        return Ok(());
+    }
+    drop(config);
+
+    let active = state.active_session.lock().await;
+    let session_id = match active.as_ref() {
+        Some(id) => id.clone(),
+        None => {
+            bot.send_message(
+                msg.chat.id,
+                "No session selected. Use /sessions first.",
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    drop(active);
+
+    let log = state.registry.get_conversation_log(&session_id).await;
+    if log.is_empty() {
+        bot.send_message(msg.chat.id, "No conversation log yet.")
+            .await?;
+        return Ok(());
+    }
+
+    // Show last 10 entries
+    let recent: Vec<_> = log.iter().rev().take(10).collect();
+    let mut text = format!("Conversation Log (session: {})\n━━━━━━━━━━━━━━━━━━━━\n\n", session_id);
+    for entry in recent.iter().rev() {
+        let icon = match entry.entry_type.as_str() {
+            "user_prompt" => "\u{1f464}",
+            "assistant_response" => "\u{1f916}",
+            "tool_summary" => "\u{1f527}",
+            _ => "\u{2022}",
+        };
+        let time = entry.timestamp.format("%H:%M:%S");
+        let content = if entry.content.len() > 200 {
+            format!("{}...", &entry.content[..200])
+        } else {
+            entry.content.clone()
+        };
+        text.push_str(&format!("{} [{}] {}\n\n", icon, time, content));
+    }
+
+    // Truncate if too long for Telegram
+    if text.len() > 4000 {
+        text.truncate(4000);
+        text.push_str("\n... (truncated)");
+    }
+
+    bot.send_message(msg.chat.id, text).await?;
+    Ok(())
+}
+
+fn format_number(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 async fn handle_help(bot: Bot, msg: Message, _state: BotState) -> ResponseResult<()> {
     let help_text = "Herald Commands:\n\n\
         /start - Connect to Herald\n\
         /sessions - List active Claude Code sessions\n\
         /status - Show daemon status\n\
+        /tokens - Show token usage across sessions\n\
+        /log - Show recent conversation log\n\
         /help - Show this help\n\n\
         Send any text message to forward it as a prompt \
         to the selected Claude Code session.";

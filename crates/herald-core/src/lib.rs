@@ -6,3 +6,4 @@ pub mod auth;
 pub mod telegram;
 pub mod session;
 pub mod security;
+pub mod logging;

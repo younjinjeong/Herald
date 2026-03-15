@@ -4,7 +4,9 @@ use tokio::sync::RwLock;
 use chrono::Utc;
 
 use crate::error::{HeraldError, Result};
-use crate::types::{SessionInfo, SessionInfoDto};
+use crate::types::{ConversationEntry, SessionInfo, SessionInfoDto, TokenUsage};
+
+const MAX_CONVERSATION_LOG: usize = 50;
 
 #[derive(Debug, Clone)]
 pub struct SessionRegistry {
@@ -60,6 +62,56 @@ impl SessionRegistry {
             .get(id)
             .map(|s| s.token.0 == token)
             .unwrap_or(false)
+    }
+
+    /// Update token usage for a session (replaces with latest cumulative values)
+    pub async fn update_token_usage(&self, id: &str, usage: TokenUsage) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(id) {
+            session.token_usage = usage;
+            session.last_activity = Utc::now();
+        }
+    }
+
+    /// Get token usage for a session
+    pub async fn get_token_usage(&self, id: &str) -> Option<TokenUsage> {
+        let sessions = self.sessions.read().await;
+        sessions.get(id).map(|s| s.token_usage.clone())
+    }
+
+    /// Get aggregated token usage across all sessions
+    pub async fn total_token_usage(&self) -> TokenUsage {
+        let sessions = self.sessions.read().await;
+        let mut total = TokenUsage::default();
+        for session in sessions.values() {
+            total.input_tokens += session.token_usage.input_tokens;
+            total.output_tokens += session.token_usage.output_tokens;
+            total.cache_read_tokens += session.token_usage.cache_read_tokens;
+            total.cache_creation_tokens += session.token_usage.cache_creation_tokens;
+            total.total_cost_usd += session.token_usage.total_cost_usd;
+        }
+        total
+    }
+
+    /// Add a conversation log entry (ring buffer, max 50 per session)
+    pub async fn add_conversation_entry(&self, id: &str, entry: ConversationEntry) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get_mut(id) {
+            session.conversation_log.push(entry);
+            if session.conversation_log.len() > MAX_CONVERSATION_LOG {
+                session.conversation_log.remove(0);
+            }
+            session.last_activity = Utc::now();
+        }
+    }
+
+    /// Get conversation log for a session
+    pub async fn get_conversation_log(&self, id: &str) -> Vec<ConversationEntry> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(id)
+            .map(|s| s.conversation_log.clone())
+            .unwrap_or_default()
     }
 }
 
