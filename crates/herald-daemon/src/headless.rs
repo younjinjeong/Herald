@@ -2,20 +2,55 @@ use anyhow::Result;
 use tokio::process::Command;
 use tracing::{error, info};
 
+/// Resolve the full path to the `claude` binary.
+/// Checks PATH first, then common install locations.
+fn resolve_claude_path() -> String {
+    // 1. Check if claude is in PATH
+    if let Ok(output) = std::process::Command::new("which")
+        .arg("claude")
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return path;
+            }
+        }
+    }
+
+    // 2. Check common install locations
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
+    let candidates = [
+        format!("{}/.local/bin/claude", home),
+        format!("{}/.cargo/bin/claude", home),
+        "/usr/local/bin/claude".to_string(),
+    ];
+
+    for path in &candidates {
+        if std::path::Path::new(path).exists() {
+            return path.clone();
+        }
+    }
+
+    // Fallback to bare command (let OS resolve)
+    "claude".to_string()
+}
+
 /// Execute a headless prompt, optionally continuing an existing session.
 /// Uses JSON output format when continuing a session for richer data extraction.
 pub async fn execute_prompt(prompt: &str, session_id: Option<&str>) -> Result<String> {
-    info!("Executing headless prompt (continue={:?})", session_id.is_some());
+    let claude_path = resolve_claude_path();
+    info!("Executing headless prompt (continue={:?}, claude={})", session_id.is_some(), claude_path);
 
-    let mut cmd = Command::new("claude");
+    let mut cmd = Command::new(&claude_path);
 
     // Prevent headless process from firing Herald hooks that would
     // overwrite and then destroy the original interactive session's registration
     cmd.env("HERALD_HEADLESS", "1");
 
     if let Some(sid) = session_id {
-        // Continue existing session with JSON output for richer parsing
-        cmd.arg("--continue")
+        // Resume specific session by ID with JSON output for richer parsing
+        cmd.arg("--resume")
             .arg(sid)
             .arg("-p")
             .arg(prompt)

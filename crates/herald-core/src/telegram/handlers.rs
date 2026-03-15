@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 use crate::auth::chat_id::{authorize, is_authorized};
 use crate::auth::otp::verify_otp;
 use crate::ipc::client::IpcClient;
-use crate::ipc::protocol::IpcRequest;
+use crate::ipc::protocol::{IpcRequest, IpcResponse};
 use crate::telegram::bot::{enqueue_message, BotState};
 use crate::telegram::callbacks::{build_session_actions_keyboard, parse_callback_data};
 use crate::telegram::formatting::escape_markdown_v2;
@@ -102,14 +102,28 @@ pub async fn text_handler(bot: Bot, msg: Message, state: BotState) -> ResponseRe
     tokio::spawn(async move {
         match IpcClient::send_via(&transport, &request).await {
             Ok(resp) => {
-                info!("Input forwarded to session: {:?}", resp);
-                enqueue_message(
-                    &queue_tx,
-                    chat_id,
-                    format!("{} \u{1f4e8} _Delivered_", escape_markdown_v2(&tag_clone)),
-                    Some("MarkdownV2".to_string()),
-                )
-                .await;
+                match &resp {
+                    IpcResponse::Error { code, message } => {
+                        error!("Input execution failed ({}): {}", code, message);
+                        enqueue_message(
+                            &queue_tx,
+                            chat_id,
+                            format!("{} Failed: {}", escape_markdown_v2(&tag_clone), escape_markdown_v2(message)),
+                            Some("MarkdownV2".to_string()),
+                        )
+                        .await;
+                    }
+                    _ => {
+                        info!("Input forwarded to session: {:?}", resp);
+                        enqueue_message(
+                            &queue_tx,
+                            chat_id,
+                            format!("{} \u{1f4e8} _Delivered_", escape_markdown_v2(&tag_clone)),
+                            Some("MarkdownV2".to_string()),
+                        )
+                        .await;
+                    }
+                }
             }
             Err(e) => {
                 error!("Failed to forward input: {}", e);

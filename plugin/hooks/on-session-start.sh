@@ -11,18 +11,8 @@ if [ -z "$SESSION_ID" ]; then
     exit 0
 fi
 
-# Find the Claude process PID (ancestor of this hook shell)
-# Walk up the process tree to find the 'claude' process
-PID=$$
-WALK_PID=$PID
-while [ "$WALK_PID" -gt 1 ]; do
-    PARENT_COMM=$(ps -o comm= -p "$WALK_PID" 2>/dev/null)
-    if [ "$PARENT_COMM" = "claude" ]; then
-        PID=$WALK_PID
-        break
-    fi
-    WALK_PID=$(ps -o ppid= -p "$WALK_PID" 2>/dev/null | tr -d ' ')
-done
+# Find the Claude process PID using robust detection from herald-common.sh
+PID=$(herald_find_claude_pid)
 CWD=$(pwd)
 
 # Build IPC register message (include tmux pane if running in tmux)
