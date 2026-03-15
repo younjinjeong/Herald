@@ -49,9 +49,12 @@ pub async fn execute_prompt(prompt: &str, session_id: Option<&str>, cwd: Option<
         cmd.current_dir(dir);
     }
 
-    // Prevent headless process from firing Herald hooks that would
-    // overwrite and then destroy the original interactive session's registration
-    cmd.env("HERALD_HEADLESS", "1");
+    // Selectively suppress session lifecycle hooks (SessionStart/SessionEnd) while
+    // allowing tool activity hooks (PostToolUse, UserPromptSubmit, Stop) to fire.
+    // The original session ID is passed so events are attributed to the right session.
+    if let Some(sid) = session_id {
+        cmd.env("HERALD_HEADLESS_SESSION", sid);
+    }
 
     // Skip Claude Code's built-in permission prompts — the Telegram user is
     // OTP-authenticated and explicitly sending this prompt

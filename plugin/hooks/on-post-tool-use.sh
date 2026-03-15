@@ -6,6 +6,8 @@ source "$(dirname "$0")/herald-common.sh"
 INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
+# Use original session ID in headless mode
+[ -n "$HERALD_HEADLESS_SESSION" ] && SESSION_ID="$HERALD_HEADLESS_SESSION"
 
 herald_read_token "$SESSION_ID"
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')

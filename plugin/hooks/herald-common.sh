@@ -1,10 +1,18 @@
 #!/bin/bash
 # Herald hooks: shared helper functions
 
-# Skip all Herald hooks when running inside headless execution
-# (prevents headless `claude --continue` from overwriting the original session)
+# Legacy blanket suppression
 if [ "$HERALD_HEADLESS" = "1" ]; then
     exit 0
+fi
+
+# Headless mode: suppress only session lifecycle hooks (SessionStart/SessionEnd).
+# Tool activity hooks (PostToolUse, UserPromptSubmit, Stop, etc.) still fire
+# so Telegram gets real-time updates from headless execution.
+if [ -n "$HERALD_HEADLESS_SESSION" ]; then
+    case "$(basename "$0")" in
+        on-session-start.sh|on-session-end.sh) exit 0 ;;
+    esac
 fi
 
 # Load config.env from plugin root (fallback for env vars)

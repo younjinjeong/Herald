@@ -9,6 +9,8 @@ INPUT=$(cat)
 
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty')
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // empty')
+# Use original session ID in headless mode
+[ -n "$HERALD_HEADLESS_SESSION" ] && SESSION_ID="$HERALD_HEADLESS_SESSION"
 
 if [ -z "$SESSION_ID" ] || [ -z "$TOOL_NAME" ]; then
     exit 0
