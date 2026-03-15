@@ -99,30 +99,31 @@ pub async fn text_handler(bot: Bot, msg: Message, state: BotState) -> ResponseRe
 
     let queue_tx = state.queue_tx.clone();
     let tag_clone = tag.clone();
+
+    // Show "Delivered" immediately so user knows the message was received
+    enqueue_message(
+        &state.queue_tx,
+        chat_id,
+        format!("{} \u{1f4e8} _Delivered_", escape_markdown_v2(&tag)),
+        Some("MarkdownV2".to_string()),
+    )
+    .await;
+
+    // Execute in background — Claude's response will arrive separately
     tokio::spawn(async move {
         match IpcClient::send_via(&transport, &request).await {
             Ok(resp) => {
-                match &resp {
-                    IpcResponse::Error { code, message } => {
-                        error!("Input execution failed ({}): {}", code, message);
-                        enqueue_message(
-                            &queue_tx,
-                            chat_id,
-                            format!("{} Failed: {}", escape_markdown_v2(&tag_clone), escape_markdown_v2(message)),
-                            Some("MarkdownV2".to_string()),
-                        )
-                        .await;
-                    }
-                    _ => {
-                        info!("Input forwarded to session: {:?}", resp);
-                        enqueue_message(
-                            &queue_tx,
-                            chat_id,
-                            format!("{} \u{1f4e8} _Delivered_", escape_markdown_v2(&tag_clone)),
-                            Some("MarkdownV2".to_string()),
-                        )
-                        .await;
-                    }
+                if let IpcResponse::Error { code, message } = &resp {
+                    error!("Input execution failed ({}): {}", code, message);
+                    enqueue_message(
+                        &queue_tx,
+                        chat_id,
+                        format!("{} Failed: {}", escape_markdown_v2(&tag_clone), escape_markdown_v2(message)),
+                        Some("MarkdownV2".to_string()),
+                    )
+                    .await;
+                } else {
+                    info!("Input forwarded to session: {:?}", resp);
                 }
             }
             Err(e) => {
