@@ -5,67 +5,66 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/Rust-2024_edition-orange.svg)](https://www.rust-lang.org/)
 
-Herald relays Claude Code session I/O to Telegram, letting you monitor and control Claude Code from your phone. It runs as a Linux daemon (`heraldd`) that connects to Telegram via long polling — no inbound ports required.
+Herald relays Claude Code session I/O to Telegram, letting you monitor and control Claude Code from your phone. It runs as a daemon (`heraldd`) that connects to Telegram via long polling — no inbound ports required. Supports Linux, macOS, Docker, and Kubernetes.
 
 ---
 
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────┐
-│                  Developer's Machine                   │
-│                                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐ │
-│  │ Claude Code  │  │ Claude Code  │  │ Claude Code  │ │
-│  │  Session #1  │  │  Session #2  │  │  Session #N  │ │
-│  │  (Plugin)    │  │  (Plugin)    │  │  (Plugin)    │ │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘ │
-│         │  Hook scripts   │                 │          │
-│         └────────────────►├◄────────────────┘          │
-│                           │                            │
-│                  Unix Domain Socket                    │
-│                           │                            │
-│                ┌──────────▼──────────┐                 │
-│                │      heraldd       │                 │
-│                │  (systemd service) │                 │
-│                │                    │                 │
-│                │  Session Registry  │                 │
-│                │  Message Queue     │                 │
-│                │  Content Filter    │                 │
-│                └──────────┬─────────┘                 │
-│                           │                            │
-└───────────────────────────┼────────────────────────────┘
-                            │ HTTPS (outbound only)
-                            ▼
-                  ┌──────────────────┐
-                  │ Telegram Bot API │
-                  │  (Long Polling)  │
-                  └────────┬─────────┘
-                           │
-                           ▼
-                  ┌──────────────────┐
-                  │ Telegram Mobile  │
-                  └──────────────────┘
+  Machine A (daemon host)              Machine B (remote)
+┌────────────────────────────┐       ┌──────────────────────┐
+│ Claude Code #1  #2  #N     │       │ Claude Code #3       │
+│   │  Plugin hooks  │       │       │   │  Plugin hooks     │
+│   └───────┬────────┘       │       │   └──────┬────────────┤
+│           │ Unix Socket    │       │          │ TCP :7272   │
+│    ┌──────▼──────────┐     │       │          │             │
+│    │    heraldd      │◄────┼───────┼──────────┘             │
+│    │                 │     │       └──────────────────────────
+│    │ Session Registry│     │
+│    │ Token Monitor   │     │       ┌──────────────────────┐
+│    │ Conversation Log│     │       │    Docker / K8s      │
+│    │ Content Filter  │     │       │  ┌────────────────┐  │
+│    └────────┬────────┘     │       │  │   heraldd      │  │
+│             │              │       │  │   (container)  │  │
+└─────────────┼──────────────┘       │  │   TCP :7272    │  │
+              │ HTTPS (outbound)     │  └────────┬───────┘  │
+              ▼                      │           │ stdout   │
+    ┌──────────────────┐             │  Promtail → Loki     │
+    │ Telegram Bot API │             └──────────────────────┘
+    │  (Long Polling)  │
+    └────────┬─────────┘
+             ▼
+    ┌──────────────────┐
+    │ Telegram Mobile  │
+    └──────────────────┘
 ```
 
 ## Features
 
+- **Multi-machine** — connect Claude Code sessions from multiple machines via TCP
+- **Token monitoring** — track input/output tokens and cost per session in real-time
+- **Conversation logging** — log user prompts and Claude responses to `/var/log/herald-relay.log`
 - **Setup wizard** — guided setup with OTP-based Telegram verification
 - **Multi-session** — monitor multiple Claude Code sessions simultaneously
 - **Outbound only** — works behind firewalls, no inbound ports needed
-- **Secure** — bot token in system keyring, Unix socket with `SO_PEERCRED`, content filtering
+- **Cross-platform** — Linux and macOS support
+- **Container-ready** — Docker, docker-compose, and Kubernetes with Loki log aggregation
+- **Secure** — bot token in system keyring, peer credential verification, content filtering
 - **Headless control** — send prompts to Claude Code from Telegram via `claude -p`
-- **PTY injection** — inject input into existing interactive sessions
-- **systemd integration** — runs as a user service with security hardening
 - **Plugin hooks** — automatic session registration via Claude Code plugin system
 
 ## Prerequisites
 
 - **Rust** 1.75+ (2024 edition)
-- **Linux** (WSL2 works) with systemd
+- **Linux** (WSL2 works) or **macOS**
 - **Telegram Bot** token from [@BotFather](https://t.me/BotFather)
 - **Claude Code** installed and accessible in `$PATH`
 - **jq** (used by plugin hook scripts)
+
+Or use **Docker** (no Rust toolchain needed).
+
+---
 
 ## Installation
 
@@ -76,18 +75,38 @@ git clone https://github.com/younjinjeong/Herald.git
 cd Herald
 cargo build --release
 
-# Install binaries to ~/.local/bin
+# Install binaries
 cp target/release/herald target/release/heraldd ~/.local/bin/
 ```
 
-### Install systemd service (optional)
+### Docker
+
+```bash
+docker build -t herald .
+docker run -e HERALD_BOT_TOKEN=your_token herald
+```
+
+### macOS
+
+```bash
+cargo build --release
+cp target/release/herald target/release/heraldd /usr/local/bin/
+
+# Install as LaunchAgent (auto-start on login)
+cp launchd/com.herald.daemon.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.herald.daemon.plist
+```
+
+### Linux systemd (optional)
 
 ```bash
 mkdir -p ~/.config/systemd/user
 cp systemd/heraldd.service ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable heraldd
+systemctl --user enable --now heraldd
 ```
+
+---
 
 ## Quick Start
 
@@ -138,15 +157,47 @@ $ herald setup
 herald start
 ```
 
-Or via systemd:
+### 4. Connect Claude Code
 
 ```bash
-systemctl --user start heraldd
+claude --plugin-dir /path/to/Herald/plugin
 ```
 
-### 4. Use from Telegram
+### 5. Use from Telegram
 
 Send `/start` to your bot — you're connected.
+
+---
+
+## Multi-Machine Setup
+
+Connect Claude Code sessions from remote machines to a central Herald daemon via TCP.
+
+**On the daemon host**, configure TCP transport:
+
+```toml
+# ~/.config/herald/config.toml
+[daemon]
+transport = "both"          # Unix socket + TCP
+listen_addr = "0.0.0.0:7272"
+```
+
+**On remote machines**, set the daemon address:
+
+```bash
+export HERALD_DAEMON_ADDR="daemon-host:7272"
+claude --plugin-dir /path/to/Herald/plugin
+```
+
+The plugin hooks auto-detect `HERALD_DAEMON_ADDR` and connect via TCP instead of Unix socket.
+
+You can also send prompts manually:
+
+```bash
+herald send --tcp daemon-host:7272 session-id "Fix the auth bug"
+```
+
+---
 
 ## Telegram Commands
 
@@ -155,9 +206,107 @@ Send `/start` to your bot — you're connected.
 | `/start` | Connect and show auth status |
 | `/sessions` | List active Claude Code sessions (with selection buttons) |
 | `/status` | Show daemon uptime, session count, connection status |
+| `/tokens` | Show token usage and cost across all sessions |
+| `/log` | Show recent conversation log for selected session |
 | `/help` | Command reference |
 
 Send any **text message** to forward it as a prompt to the selected Claude Code session.
+
+---
+
+## Token Monitoring
+
+Herald tracks token consumption per session in real-time.
+
+The `/tokens` command shows:
+
+```
+Token Usage Summary
+━━━━━━━━━━━━━━━━━━━━
+Total: 45.2K in / 12.1K out
+Cache: 32.0K read / 8.5K created
+Cost:  $0.3172
+
+Per session:
+  abc123 — 25.1K in / 7.2K out ($0.1830)
+  def456 — 20.1K in / 4.9K out ($0.1342)
+```
+
+Token data is extracted from the Claude Code session transcript after each tool use. Cost is estimated using Claude Sonnet 4 pricing.
+
+---
+
+## Conversation Logging
+
+Herald captures user prompts and Claude's descriptive responses (not code or raw CLI output).
+
+**Telegram delivery** — conversation entries appear in real-time:
+
+```
+👤 You: "Fix the authentication bug in login.rs"
+
+🤖 Claude: "I found the issue — the token validation was
+skipping the expiry check. I've updated the verify_token
+function to include a timestamp comparison."
+
+🔧 Tool: Edit login.rs (+5 -2)
+```
+
+**File log** — written to `/var/log/herald-relay.log` (Linux) or `~/Library/Logs/herald/herald-relay.log` (macOS):
+
+```
+2026-03-15T14:32:05+00:00 [session:abc123] USER: Fix the authentication bug in login.rs
+2026-03-15T14:32:08+00:00 [session:abc123] CLAUDE: I found the issue — the token validation was skipping the expiry check.
+2026-03-15T14:32:10+00:00 [session:abc123] TOOL: Edit login.rs (+5 -2)
+2026-03-15T14:32:15+00:00 [session:abc123] TOKENS: in=1200 out=450 cache_read=800 cost=$0.0120
+```
+
+Code blocks and command outputs are automatically stripped from logged responses. Secrets (API keys, passwords) are redacted.
+
+Use `/log` in Telegram to view the last 10 conversation entries for the selected session.
+
+---
+
+## Docker Deployment
+
+### Standalone
+
+```bash
+docker build -t herald .
+docker run -d \
+  -e HERALD_BOT_TOKEN=your_token \
+  -p 7272:7272 \
+  herald
+```
+
+### With Loki monitoring
+
+```bash
+# Start Herald + Loki + Promtail + Grafana
+docker compose --profile monitoring up -d
+```
+
+Container mode automatically:
+- Outputs structured JSON logs to stdout (for Loki/Promtail)
+- Uses TCP transport (no Unix socket)
+- Skips systemd integration
+- Uses token-only authentication (no peer credentials)
+
+### Kubernetes
+
+```bash
+# Create bot token secret
+kubectl create secret generic herald-secrets \
+  --from-literal=bot-token=YOUR_BOT_TOKEN
+
+# Deploy
+kubectl apply -f k8s/deployment.yaml
+
+# Optional: deploy Promtail with Herald-aware scrape config
+kubectl apply -f k8s/promtail-config.yaml
+```
+
+---
 
 ## Claude Code Plugin
 
@@ -169,7 +318,10 @@ claude --plugin-dir /path/to/Herald/plugin
 
 The plugin automatically:
 - Registers the session with `heraldd` on start
+- Captures your prompts (`UserPromptSubmit` hook)
 - Relays tool output (Bash, Write, Edit, Read) to Telegram
+- Extracts token usage from session transcript
+- Captures Claude's responses for conversation logging
 - Forwards notifications and permission requests
 - Unregisters the session on exit
 
@@ -178,10 +330,13 @@ The plugin automatically:
 | Event | Script | Behavior |
 |-------|--------|----------|
 | `SessionStart` | `on-session-start.sh` | Registers session with daemon |
-| `SessionEnd` | `on-session-end.sh` | Unregisters session |
-| `PostToolUse` | `on-post-tool-use.sh` | Relays tool output (async) |
+| `UserPromptSubmit` | `on-user-prompt.sh` | Captures user prompt for conversation log |
+| `PostToolUse` | `on-post-tool-use.sh` | Relays tool output + extracts token usage |
 | `Notification` | `on-notification.sh` | Relays notifications (async) |
-| `Stop` | `on-stop.sh` | Sends session stopped event |
+| `Stop` | `on-stop.sh` | Captures assistant response + session stop |
+| `SessionEnd` | `on-session-end.sh` | Unregisters session |
+
+---
 
 ## Configuration
 
@@ -190,7 +345,11 @@ Config file: `~/.config/herald/config.toml`
 ```toml
 [daemon]
 socket_path = "/run/user/1000/herald/herald.sock"
+listen_addr = "0.0.0.0:7272"     # TCP listener for remote connections
+transport = "unix"                # "unix" | "tcp" | "both"
 log_level = "INFO"
+log_output = "file"               # "file" | "stdout" | "both"
+auth_mode = "peercred"            # "peercred" | "token_only"
 
 [auth]
 allowed_chat_ids = [123456789]
@@ -209,53 +368,80 @@ max_concurrent = 10
 
 Bot token is stored separately in the system keyring (not in the config file).
 
+**Environment variables:**
+
+| Variable | Description |
+|----------|-------------|
+| `HERALD_BOT_TOKEN` | Bot token (overrides keyring) |
+| `HERALD_DAEMON_ADDR` | Remote daemon address for TCP (e.g., `host:7272`) |
+| `HERALD_CONTAINER` | Set to `1` for container mode (stdout logging, token-only auth) |
+
+---
+
 ## CLI Reference
 
 ```
-herald setup     # Interactive setup wizard
-herald start     # Start the daemon
-herald stop      # Stop the daemon
-herald status    # Show daemon and session status
-herald send <session> <message>   # Send prompt to a session
+herald setup                         # Interactive setup wizard
+herald start                         # Start the daemon
+herald stop                          # Stop the daemon
+herald status                        # Show daemon and session status
+herald send <session> <message>      # Send prompt to a session
+herald send --tcp host:7272 <s> <m>  # Send prompt via TCP to remote daemon
 ```
+
+---
 
 ## Security
 
-- **Bot token**: stored in OS keyring via `libsecret` / GNOME Keyring — never in plaintext
-- **IPC authentication**: Unix socket with `SO_PEERCRED` — only same-UID processes can connect
-- **Session tokens**: UUID v4, validated on every IPC message, invalidated on daemon restart
-- **OTP verification**: 6-digit code, 5-minute TTL, 3 attempt limit
-- **Content filtering**: API keys, tokens, passwords automatically redacted before relay
-- **systemd hardening**: `NoNewPrivileges`, `ProtectSystem=strict`, `ProtectHome=read-only`, `PrivateTmp`
+| Layer | Linux | macOS | Container |
+|-------|-------|-------|-----------|
+| **IPC auth** | `SO_PEERCRED` (UID match) | `getpeereid` (UID match) | Token-only |
+| **Bot token storage** | System keyring (libsecret) | System keyring (macOS Keychain) | Env variable |
+| **Session tokens** | UUID v4, per-message validation | Same | Same |
+| **OTP verification** | 6-digit, 5 min TTL, 3 attempts | Same | Same |
+| **Content filtering** | API keys, passwords redacted | Same | Same |
+| **Service hardening** | systemd `NoNewPrivileges`, `ProtectSystem=strict` | launchd | K8s resource limits |
+
+---
 
 ## Project Structure
 
 ```
 Herald/
 ├── crates/
-│   ├── herald-core/        # Shared library
+│   ├── herald-core/           # Shared library
 │   │   └── src/
-│   │       ├── config.rs       # TOML config + keyring
-│   │       ├── ipc/            # Unix socket protocol
-│   │       ├── auth/           # OTP + chat_id auth
-│   │       ├── telegram/       # Bot, commands, handlers
-│   │       ├── session/        # Registry + tokens
-│   │       └── security/       # SO_PEERCRED + content filter
-│   ├── herald-cli/         # CLI binary (herald)
-│   │   └── src/commands/       # setup, start, stop, status, send
-│   └── herald-daemon/      # Daemon binary (heraldd)
+│   │       ├── config.rs          # TOML config + keyring
+│   │       ├── logging.rs         # Conversation logger (file + stdout JSON)
+│   │       ├── ipc/               # Unix socket + TCP protocol
+│   │       ├── auth/              # OTP + chat_id auth
+│   │       ├── telegram/          # Bot, commands, handlers
+│   │       ├── session/           # Registry + tokens + token usage
+│   │       └── security/          # Peer credentials + content filter
+│   ├── herald-cli/            # CLI binary (herald)
+│   │   └── src/commands/          # setup, start, stop, status, send
+│   └── herald-daemon/         # Daemon binary (heraldd)
 │       └── src/
-│           ├── service.rs      # IPC + Telegram orchestration
-│           ├── headless.rs     # claude -p execution
-│           ├── pty.rs          # PTY stdin injection
-│           └── queue.rs        # Rate-limited message queue
-├── plugin/                 # Claude Code plugin
+│           ├── service.rs         # IPC + Telegram orchestration
+│           ├── headless.rs        # claude -p execution
+│           ├── pty.rs             # PTY stdin injection (Linux only)
+│           └── queue.rs           # Rate-limited message queue
+├── plugin/                    # Claude Code plugin
 │   ├── .claude-plugin/
-│   ├── hooks/                  # Shell scripts for each event
-│   └── commands/               # /herald slash command
-└── systemd/
-    └── heraldd.service     # systemd user unit
+│   ├── hooks/                     # Shell scripts for each event
+│   └── commands/                  # /herald slash command
+├── systemd/                   # Linux systemd unit
+├── launchd/                   # macOS LaunchAgent plist
+├── k8s/                       # Kubernetes manifests
+│   ├── deployment.yaml
+│   └── promtail-config.yaml
+├── Dockerfile
+├── docker-compose.yml
+└── scripts/
+    └── herald-relay.logrotate
 ```
+
+---
 
 ## Development
 
@@ -263,11 +449,11 @@ Herald/
 # Build
 cargo build
 
+# Build without systemd (for macOS or containers)
+cargo build --no-default-features
+
 # Run tests
 cargo test
-
-# Check without building
-cargo check
 
 # Lint
 cargo clippy
@@ -278,10 +464,13 @@ cargo clippy
 | Crate | Purpose |
 |-------|---------|
 | [teloxide](https://github.com/teloxide/teloxide) | Telegram Bot API |
-| [tokio](https://tokio.rs) | Async runtime |
+| [tokio](https://tokio.rs) | Async runtime (Unix sockets, TCP, signals) |
 | [clap](https://github.com/clap-rs/clap) | CLI argument parsing |
-| [nix](https://github.com/nix-rust/nix) | Unix socket credentials |
+| [nix](https://github.com/nix-rust/nix) | Unix socket credentials (SO_PEERCRED / getpeereid) |
 | [keyring](https://github.com/hwchen/keyring-rs) | Secure token storage |
+| [tracing](https://github.com/tokio-rs/tracing) | Structured logging |
+
+---
 
 ## License
 
